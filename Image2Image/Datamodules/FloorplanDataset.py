@@ -145,8 +145,11 @@ class img2img_dataset_traj_1D(Dataset):
         
         if self.mode == 'grayscale':
             # Scale timestamp values with respect to maximum timestamp value
-            traj /= 89.5
-            assert 0 <= traj.max() <= 1.
+            # SETTING 1
+            # traj /= 89.5
+            # traj[traj == 0.] = -0.02
+            # SETTING 2
+            traj[traj == 0] = -5
             # If passed as numpy, trajectory does not get normalized
         elif self.mode == 'rgb':
             # TODO Maybe change/remove this once transforms switch from Normalization to something else

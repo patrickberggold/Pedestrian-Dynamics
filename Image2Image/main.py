@@ -14,7 +14,7 @@ from helper import get_color_from_array, SEP
 
 CUDA_DEVICE = 1 # 0, 1 or 'cpu'
 MODE = 'grayscale' # implemented: grayscale, rgb, bool
-BATCH_SIZE = 1
+BATCH_SIZE = 4
 
 do_training = False
 
@@ -26,8 +26,8 @@ if do_training:
     # print(model)
 
     checkpoint_callback = ModelCheckpoint(
-        dirpath = 'checkpoints/checkpoints_DeepLab4Img2Img',
-        filename = 'model_grayscale_{epoch}-{step}',
+        dirpath = SEP.join(['Image2Image','checkpoints', 'checkpoints_DeepLab4Img2Img']),
+        filename = 'model_grayscale_scale_-0.02_1.0_{epoch}-{step}',
         save_top_k = 1,
         verbose = True, 
         monitor = 'loss',
@@ -44,7 +44,7 @@ if do_training:
 
 # Load stored model
 # keys in state_dict need to be adjusted
-CKPT_PATH = SEP.join(['Image2Image', 'checkpoints', 'checkpoints_DeepLab4Img2Img', 'model_grayscale_epoch=30-step=5518.ckpt']) # model_rgb_epoch=10-step=1958
+CKPT_PATH = SEP.join(['Image2Image', 'checkpoints', 'checkpoints_DeepLab4Img2Img', 'model_grayscale_scale_-5_89.5_epoch=7-step=1424.ckpt']) # model_rgb_epoch=10-step=1958
 state_dict = OrderedDict([(key.replace('net.', ''), tensor) if key.startswith('net.') else (key, tensor) for key, tensor in torch.load(CKPT_PATH)['state_dict'].items()])
 model = Image2ImageModule(mode=MODE)
 model.net.load_state_dict(state_dict)
@@ -65,7 +65,7 @@ for idx, batch in enumerate(testloader):
     img = batch[0].float().cuda()
     traj = batch[1]
     if MODE == 'grayscale':
-        traj *= 89.5 # type np, shape (800,800)
+        traj = traj#*89.5 # type np, shape (800,800)
     elif MODE == 'bool':
         traj = traj # shape (800, 800)
     
@@ -78,12 +78,24 @@ for idx, batch in enumerate(testloader):
         
         if MODE == 'grayscale':
             img_gt = img[i].transpose(0,1).transpose(1, 2).detach().cpu().numpy()#*255
-            traj_pred_np = 89.5*traj_pred_np.squeeze() # Multiply by MAX_TIME
-            traj_pred_bigger_ones = np.argwhere(traj_pred_np > 1.0)
-            colors_from_timestamps = [get_color_from_array(traj_pred_np[x, y], 89.5)/255. for x, y in traj_pred_bigger_ones]
+            traj_pred_np = traj_pred_np.squeeze()#*89.5 # Multiply by MAX_TIME
+            traj_pred_bigger_ones = np.argwhere(traj_pred_np > 0.0)
+            pred_colors_from_timestamps = [get_color_from_array(traj_pred_np[x, y], 89.5)/255. for x, y in traj_pred_bigger_ones]
+
+            # 3D plot
+            # fig = plt.figure(figsize=(6,6))
+            # ax = fig.add_subplot(111, projection='3d')
+            # X,Y = np.meshgrid(np.arange(800), np.arange(800))
+            # ax.plot_surface(X, Y, traj_pred_np)
+            # plt.show()
 
             traj_pred_img = img_gt.copy()
-            traj_pred_img[traj_pred_bigger_ones[:,0], traj_pred_bigger_ones[:,1]] = np.array(colors_from_timestamps)
+            traj_pred_img[traj_pred_bigger_ones[:,0], traj_pred_bigger_ones[:,1]] = np.array(pred_colors_from_timestamps)
+
+            traj_np = traj[i].detach().cpu().numpy()
+            traj_np = np.clip(traj_np, 0, traj_np.max())
+            gt_colors_from_timestamps = [get_color_from_array(traj_np[x, y], 89.5)/255. for x, y in np.argwhere(traj_np > 0.)]
+            img_gt[np.argwhere(traj_np > 0.)[:,0], np.argwhere(traj_np > 0.)[:,1]] = np.array(gt_colors_from_timestamps)
 
         elif MODE == 'bool': 
             labels = torch.argmax(traj_pred, dim = 0)
