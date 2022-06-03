@@ -5,6 +5,7 @@ import numpy as np
 import os
 import random
 import h5py
+from helper import SEP
 
 # TODO OPEN QUESTION
 # What should be the input? RGB image with colored regions (so RGB format) or pixel annotations (so 'greyscale' values from 0 to num_classes)
@@ -135,7 +136,7 @@ class img2img_dataset_traj_1D(Dataset):
     def __getitem__(self, idx):
         img_path, traj_path = self.img_paths[idx], self.traj_paths[idx]
         # quick check if paths are consistent
-        assert '/'.join(img_path.split('/')[-2:]) == '/'.join(traj_path.split('/')[-2:])
+        assert SEP.join(img_path.split(SEP)[-2:]) == SEP.join(traj_path.split(SEP)[-2:])
         
         img = np.array(h5py.File(img_path, 'r').get('img'))
         # plt.imsave(f'test_input_img_{idx}.jpeg', img, vmin=0, vmax=255)

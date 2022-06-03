@@ -9,6 +9,10 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 from matplotlib.colors import ListedColormap, LinearSegmentedColormap
 from scipy import ndimage
+import platform
+
+OpSys = platform.system()
+SEP = '\\' if OpSys == 'Windows' else '/'
 
 CLASS_NAMES = {
     # get color values from https://doc.instantreality.org/tools/color_calculator/

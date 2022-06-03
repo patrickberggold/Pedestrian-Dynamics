@@ -4,6 +4,7 @@ from torchvision import transforms
 from torch.utils.data import DataLoader
 import os, random
 from .FloorplanDataset import img2img_dataset_traj_1D, semantic_dataset
+from helper import SEP
 
 class FloorplanDataModule(pl.LightningDataModule):
     def __init__(self, mode: str, cuda_index: int, split: str = "train", batch_size: int = 4):
@@ -58,11 +59,11 @@ class FloorplanDataModule(pl.LightningDataModule):
         # self.current_split = current_split
         # assert self.current_split in ['train', 'val', 'test']
 
-        self.img_path = '/home/Datasets/Segmentation/Floorplans/HDF5_INPUT_IMAGES_resolution_800_800'
+        self.img_path = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'HDF5_INPUT_IMAGES_resolution_800_800']) # '/home/Datasets/Segmentation/Floorplans/HDF5_INPUT_IMAGES_resolution_800_800'
         if self.mode == 'grayscale' or self.mode == 'bool':
-            self.traj_path = '/home/Datasets/Image2Image/HDF5_GT_TIMESTAMP_MASKS_resolution_800_800'
+            self.traj_path = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'HDF5_GT_TIMESTAMP_MASKS_resolution_800_800'])
         elif self.mode == 'rgb':
-            self.traj_path = '/home/Datasets/Image2Image/HDF5_GT_COLORED_TRAJ_resolution_800_800'
+            self.traj_path = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'HDF5_GT_COLORED_TRAJ_resolution_800_800'])
         else:
             self.traj_path = None
 
@@ -75,7 +76,7 @@ class FloorplanDataModule(pl.LightningDataModule):
         assert len(self.img_list) == len(self.traj_list), 'Images list and trajectory list do not have same length, something went wrong!'
         # Randomly check if entries are the same
         index_check_list = random.sample(range(len(self.img_list)), 10)
-        assert ['/'.join(self.img_list[i].split('/')[-2:]) for i in index_check_list] == ['/'.join(self.traj_list[i].split('/')[-2:]) for i in index_check_list], \
+        assert [SEP.join(self.img_list[i].split('\\')[-2:]) for i in index_check_list] == [SEP.join(self.traj_list[i].split('\\')[-2:]) for i in index_check_list], \
             'Images list and trajectory list do not have same entries, something went wrong!'
     	
         val_split_factor = self.splits[1]
