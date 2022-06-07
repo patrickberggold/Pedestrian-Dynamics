@@ -11,14 +11,23 @@ from Datamodules import FloorplanDataModule
 from collections import OrderedDict
 from torchvision import transforms
 from helper import get_color_from_array, SEP
+from hyperparameter_optim import hyperparameter_optimization
 
 CUDA_DEVICE = 1 # 0, 1 or 'cpu'
 MODE = 'grayscale' # implemented: grayscale, rgb, bool
 BATCH_SIZE = 4
 
 do_training = False
+do_hyperparameter_optim = True
 
-datamodule = FloorplanDataModule(mode=MODE, cuda_index=CUDA_DEVICE, batch_size=BATCH_SIZE)
+datamodule = FloorplanDataModule(mode = MODE, cuda_index = CUDA_DEVICE, batch_size = BATCH_SIZE)
+
+if do_hyperparameter_optim:
+
+    best_trial = hyperparameter_optimization(mode = MODE, datamodule = datamodule, n_trials = 20, cuda_device = CUDA_DEVICE)
+
+    if not do_training:
+        quit()
 
 if do_training:
 

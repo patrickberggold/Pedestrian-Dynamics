@@ -1,5 +1,6 @@
-import torch
 from torch.nn import functional as F
+from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR, ExponentialLR
+from torch.optim import Adam
 import pytorch_lightning as pl
 from torchsummary import summary
 from models import deeplabv3_resnet50
@@ -52,22 +53,37 @@ class Image2ImageModule(pl.LightningModule):
     def forward(self, x):
         return self.net(x)
 
-    def training_step(self, batch) :
+    def training_step(self, batch, batch_idx: int):
 
         img, traj = batch
         img = img.float()
         traj_pred = self.forward(img)['out']
 
         if self.mode == 'bool' or self.mode == 'segmentation':
-            loss_val = F.cross_entropy(traj_pred, traj.long(), ignore_index = 250)
+            train_loss = F.cross_entropy(traj_pred, traj.long(), ignore_index = 250)
         else:
-            loss_val = F.mse_loss(traj_pred.squeeze(), traj.float())
+            train_loss = F.mse_loss(traj_pred.squeeze(), traj.float())
         
-        self.log('loss', loss_val, on_step=False, on_epoch=True)
-        return {'loss' : loss_val}
+        self.log('train_loss', train_loss, on_step=False, on_epoch=True)
+        return {'train_loss' : train_loss}
+
+    # def training_step(self, batch, batch_idx: int) -> torch.Tensor:
+    #     data, target = batch
+    #     output = self(data)
+    #     return F.nll_loss(output, target)
+
+    # TODO adapt validation_step() 
+    def validation_step(self, batch, batch_idx: int) -> None:
+        data, target = batch
+        output = self(data)
+        pred = output.argmax(dim=1, keepdim=True)
+        accuracy = pred.eq(target.view_as(pred)).float().mean()
+        self.log("val_acc", accuracy)
+        self.log("hp_metric", accuracy, on_step=False, on_epoch=True)
     
     def configure_optimizers(self):
-        opt = torch.optim.Adam(self.net.parameters(), lr = self.learning_rate)
-        sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max = 10)
+        opt = Adam(self.net.parameters(), lr = self.learning_rate)
+        # TODO implement other schedulers
+        sch = CosineAnnealingLR(opt, T_max = 10)
         return [opt], [sch]
 
