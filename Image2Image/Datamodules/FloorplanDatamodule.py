@@ -7,7 +7,7 @@ from .FloorplanDataset import img2img_dataset_traj_1D, semantic_dataset
 from helper import SEP
 
 class FloorplanDataModule(pl.LightningDataModule):
-    def __init__(self, mode: str, cuda_index: int, split: str = "train", batch_size: int = 4):
+    def __init__(self, mode: str, cuda_index: int, split: str = "train", batch_size: int = 4, splits: list = [0.7, 0.15, 0.15]):
         super().__init__()
         assert mode in ['grayscale', 'rgb', 'bool', 'segmentation'], 'Unknown mode setting!'
         self.mode = mode
@@ -20,7 +20,7 @@ class FloorplanDataModule(pl.LightningDataModule):
         ])
         self.cuda_index = cuda_index
 
-        self.set_data_paths()
+        self.set_data_paths(splits)
 
     def setup(self, stage):
         if self.mode == 'segmentation':
@@ -50,7 +50,7 @@ class FloorplanDataModule(pl.LightningDataModule):
             batch = super().transfer_batch_to_device(batch, device, dataloader_idx)
             return batch
 
-    def set_data_paths(self,  splits: list = [0.8, 0.0, 0.2]):
+    def set_data_paths(self,  splits: list):
         
         assert sum(splits) == 1., 'Splits do not accumulate to 100%'
         assert len(splits) == 3, 'Splits are not transfered in correct format (which is [train_split, val_split, test_split])'

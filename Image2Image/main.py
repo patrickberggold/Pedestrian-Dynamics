@@ -3,7 +3,7 @@ import torch
 from statistics import mode
 import matplotlib.pyplot as plt
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 import numpy as np
 from models import Image2ImageModule
@@ -24,7 +24,7 @@ datamodule = FloorplanDataModule(mode = MODE, cuda_index = CUDA_DEVICE, batch_si
 
 if do_hyperparameter_optim:
 
-    best_trial = hyperparameter_optimization(mode = MODE, datamodule = datamodule, n_trials = 20, cuda_device = CUDA_DEVICE)
+    best_trial = hyperparameter_optimization(mode = MODE, datamodule = datamodule, n_trials = 5, cuda_device = CUDA_DEVICE)
 
     if not do_training:
         quit()
@@ -34,16 +34,25 @@ if do_training:
     model = Image2ImageModule(mode=MODE)
     # print(model)
 
-    checkpoint_callback = ModelCheckpoint(
+    model_checkpoint = ModelCheckpoint(
         dirpath = SEP.join(['Image2Image','checkpoints', 'checkpoints_DeepLab4Img2Img']),
-        filename = 'model_grayscale_scale_-0.02_1.0_{epoch}-{step}',
+        filename = 'DELETE_model_grayscale_scale_-0.02_1.0_{epoch}-{step}',
         save_top_k = 1,
         verbose = True, 
-        monitor = 'loss',
+        monitor = 'val_loss',
         mode = 'min',
     )
 
-    trainer = pl.Trainer(gpus = [CUDA_DEVICE], devices=f'cuda:{str(CUDA_DEVICE)}', max_epochs = 70, checkpoint_callback = [checkpoint_callback], callbacks=[EarlyStopping(monitor="loss", mode="min", patience=8), checkpoint_callback])
+    trainer = pl.Trainer(
+        gpus = [CUDA_DEVICE], 
+        devices=f'cuda:{str(CUDA_DEVICE)}', 
+        max_epochs = 70, 
+        # checkpoint_callback = [checkpoint_callback], 
+        callbacks=[EarlyStopping(monitor="val_loss", mode="min", patience=8), LearningRateMonitor(logging_interval='epoch'), model_checkpoint],
+        limit_train_batches=2,
+        limit_val_batches=1,
+        # progress_bar_refresh_rate=125,
+        )
 
     trainer.fit(model, datamodule=datamodule)
     # automatically restores model, epoch, step, LR schedulers, apex, etc...
@@ -53,7 +62,7 @@ if do_training:
 
 # Load stored model
 # keys in state_dict need to be adjusted
-CKPT_PATH = SEP.join(['Image2Image', 'checkpoints', 'checkpoints_DeepLab4Img2Img', 'model_grayscale_scale_-5_89.5_epoch=7-step=1424.ckpt']) # model_rgb_epoch=10-step=1958
+CKPT_PATH = SEP.join(['Image2Image', 'checkpoints', 'checkpoints_DeepLab4Img2Img', 'model_grayscale_scale_-5_89.5_epoch=10-step=1958.ckpt']) # model_rgb_epoch=10-step=1958.ckpt
 state_dict = OrderedDict([(key.replace('net.', ''), tensor) if key.startswith('net.') else (key, tensor) for key, tensor in torch.load(CKPT_PATH)['state_dict'].items()])
 model = Image2ImageModule(mode=MODE)
 model.net.load_state_dict(state_dict)
@@ -86,25 +95,27 @@ for idx, batch in enumerate(testloader):
         traj_pred_np = traj_pred[i].transpose(0,1).transpose(1, 2).cpu().detach().numpy()
         
         if MODE == 'grayscale':
+            # Get GT floorplan RGB
             img_gt = img[i].transpose(0,1).transpose(1, 2).detach().cpu().numpy()#*255
+            # Draw predicted trajectories into floorplan
             traj_pred_np = traj_pred_np.squeeze()#*89.5 # Multiply by MAX_TIME
-            traj_pred_bigger_ones = np.argwhere(traj_pred_np > 0.0)
-            pred_colors_from_timestamps = [get_color_from_array(traj_pred_np[x, y], 89.5)/255. for x, y in traj_pred_bigger_ones]
-
-            # 3D plot
-            # fig = plt.figure(figsize=(6,6))
-            # ax = fig.add_subplot(111, projection='3d')
-            # X,Y = np.meshgrid(np.arange(800), np.arange(800))
-            # ax.plot_surface(X, Y, traj_pred_np)
-            # plt.show()
-
+            traj_pred_bigger_thresh = np.argwhere(traj_pred_np > 0.0)
+            pred_colors_from_timestamps = [get_color_from_array(traj_pred_np[x, y], 89.5)/255. for x, y in traj_pred_bigger_thresh]
             traj_pred_img = img_gt.copy()
-            traj_pred_img[traj_pred_bigger_ones[:,0], traj_pred_bigger_ones[:,1]] = np.array(pred_colors_from_timestamps)
+            traj_pred_img[traj_pred_bigger_thresh[:,0], traj_pred_bigger_thresh[:,1]] = np.array(pred_colors_from_timestamps)
 
+            # Draw GT trajectories into floorplan
             traj_np = traj[i].detach().cpu().numpy()
-            traj_np = np.clip(traj_np, 0, traj_np.max())
+            # traj_np = np.clip(traj_np, 0, traj_np.max())
             gt_colors_from_timestamps = [get_color_from_array(traj_np[x, y], 89.5)/255. for x, y in np.argwhere(traj_np > 0.)]
             img_gt[np.argwhere(traj_np > 0.)[:,0], np.argwhere(traj_np > 0.)[:,1]] = np.array(gt_colors_from_timestamps)
+
+            # 3D plot
+            fig = plt.figure(figsize=(6,6))
+            ax = fig.add_subplot(111, projection='3d')
+            X,Y = np.meshgrid(np.arange(800), np.arange(800))
+            ax.plot_surface(X, Y, traj_np)
+            plt.show()
 
         elif MODE == 'bool': 
             labels = torch.argmax(traj_pred, dim = 0)

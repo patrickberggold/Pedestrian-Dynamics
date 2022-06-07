@@ -64,22 +64,29 @@ class Image2ImageModule(pl.LightningModule):
         else:
             train_loss = F.mse_loss(traj_pred.squeeze(), traj.float())
         
-        self.log('train_loss', train_loss, on_step=False, on_epoch=True)
-        return {'train_loss' : train_loss}
+        self.log('loss', train_loss, on_step=False, on_epoch=True)
+        return {'loss' : train_loss}
 
-    # def training_step(self, batch, batch_idx: int) -> torch.Tensor:
-    #     data, target = batch
-    #     output = self(data)
-    #     return F.nll_loss(output, target)
-
-    # TODO adapt validation_step() 
     def validation_step(self, batch, batch_idx: int) -> None:
-        data, target = batch
-        output = self(data)
-        pred = output.argmax(dim=1, keepdim=True)
-        accuracy = pred.eq(target.view_as(pred)).float().mean()
-        self.log("val_acc", accuracy)
-        self.log("hp_metric", accuracy, on_step=False, on_epoch=True)
+
+        img, traj = batch
+        img = img.float()
+        traj_pred = self.forward(img)['out']
+
+        if self.mode == 'bool' or self.mode == 'segmentation':
+            val_loss = F.cross_entropy(traj_pred, traj.long(), ignore_index = 250)
+        else:
+            val_loss = F.mse_loss(traj_pred.squeeze(), traj.float())
+        
+        self.log('val_loss', val_loss)
+        return {'val_loss' : val_loss}
+
+        # data, target = batch
+        # output = self(data)
+        # pred = output.argmax(dim=1, keepdim=True)
+        # accuracy = pred.eq(target.view_as(pred)).float().mean()
+        # self.log("val_acc", accuracy)
+        # self.log("hp_metric", accuracy, on_step=False, on_epoch=True)
     
     def configure_optimizers(self):
         opt = Adam(self.net.parameters(), lr = self.learning_rate)
@@ -87,3 +94,7 @@ class Image2ImageModule(pl.LightningModule):
         sch = CosineAnnealingLR(opt, T_max = 10)
         return [opt], [sch]
 
+    # def configure_callbacks(self):
+    #     early_stop = EarlyStopping(monitor="val_acc", mode="max")
+    #     checkpoint = ModelCheckpoint(monitor="val_loss")
+    #     return [early_stop, checkpoint]
