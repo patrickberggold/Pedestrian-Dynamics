@@ -1,6 +1,5 @@
 import os
 import torch
-from statistics import mode
 import matplotlib.pyplot as plt
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
@@ -13,18 +12,18 @@ from torchvision import transforms
 from helper import get_color_from_array, SEP
 from hyperparameter_optim import hyperparameter_optimization
 
-CUDA_DEVICE = 1 # 0, 1 or 'cpu'
+CUDA_DEVICE = 0 # 0, 1 or 'cpu'
 MODE = 'grayscale' # implemented: grayscale, rgb, bool
 BATCH_SIZE = 4
 
 do_training = False
-do_hyperparameter_optim = True
+do_hyperparameter_optim = False
 
 datamodule = FloorplanDataModule(mode = MODE, cuda_index = CUDA_DEVICE, batch_size = BATCH_SIZE)
 
 if do_hyperparameter_optim:
 
-    best_trial = hyperparameter_optimization(mode = MODE, datamodule = datamodule, n_trials = 5, cuda_device = CUDA_DEVICE)
+    best_trial = hyperparameter_optimization(mode = MODE, datamodule = datamodule, n_trials = 60, epochs_per_trial = 12, cuda_device = CUDA_DEVICE, limit_train_batches = None, limit_val_batches = None)
 
     if not do_training:
         quit()
@@ -60,10 +59,11 @@ if do_training:
 
     quit()
 
-# Load stored model
-# keys in state_dict need to be adjusted
-CKPT_PATH = SEP.join(['Image2Image', 'checkpoints', 'checkpoints_DeepLab4Img2Img', 'model_grayscale_scale_-5_89.5_epoch=10-step=1958.ckpt']) # model_rgb_epoch=10-step=1958.ckpt
-state_dict = OrderedDict([(key.replace('net.', ''), tensor) if key.startswith('net.') else (key, tensor) for key, tensor in torch.load(CKPT_PATH)['state_dict'].items()])
+# Load stored model: keys in state_dict need to be adjusted
+# CKPT_PATH = SEP.join(['Image2Image', 'checkpoints', 'checkpoints_DeepLab4Img2Img', 'model_grayscale_scale_-5_89.5_epoch=10-step=1958.ckpt']) # model_rgb_epoch=10-step=1958.ckpt
+# state_dict = OrderedDict([(key.replace('net.', ''), tensor) if key.startswith('net.') else (key, tensor) for key, tensor in torch.load(CKPT_PATH)['state_dict'].items()])
+CKPT_PATH = SEP.join(['Image2Image', 'Optimization', 'best_optuna_model.ckpt'])
+state_dict = torch.load(CKPT_PATH)
 model = Image2ImageModule(mode=MODE)
 model.net.load_state_dict(state_dict)
 
@@ -111,11 +111,11 @@ for idx, batch in enumerate(testloader):
             img_gt[np.argwhere(traj_np > 0.)[:,0], np.argwhere(traj_np > 0.)[:,1]] = np.array(gt_colors_from_timestamps)
 
             # 3D plot
-            fig = plt.figure(figsize=(6,6))
-            ax = fig.add_subplot(111, projection='3d')
-            X,Y = np.meshgrid(np.arange(800), np.arange(800))
-            ax.plot_surface(X, Y, traj_np)
-            plt.show()
+            # fig = plt.figure(figsize=(6,6))
+            # ax = fig.add_subplot(111, projection='3d')
+            # X,Y = np.meshgrid(np.arange(800), np.arange(800))
+            # ax.plot_surface(X, Y, traj_pred_np)
+            # plt.show()
 
         elif MODE == 'bool': 
             labels = torch.argmax(traj_pred, dim = 0)

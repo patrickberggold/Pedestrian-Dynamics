@@ -1,5 +1,5 @@
 from torch.nn import functional as F
-from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR, ExponentialLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR, ExponentialLR, ReduceLROnPlateau
 from torch.optim import Adam
 import pytorch_lightning as pl
 from torchsummary import summary
@@ -7,13 +7,17 @@ from models import deeplabv3_resnet50
 # from torchvision.models.segmentation.deeplabv3 import deeplabv3_resnet50
 
 class Image2ImageModule(pl.LightningModule):
-    def __init__(self, mode: str, learning_rate: float = 1e-3):
+    def __init__(self, mode: str, learning_rate: float = 1e-3, lr_scheduler: str = CosineAnnealingLR.__name__, lr_sch_step_size: int = 10, lr_sch_gamma: float = 0.1):
         super(Image2ImageModule, self).__init__()
         
         assert mode in ['grayscale', 'rgb', 'bool', 'segmentation'], 'Unknown mode setting!'
         
         self.mode = mode
         self.learning_rate = learning_rate
+        self.lr_scheduler = lr_scheduler
+        self.lr_sch_step_size = lr_sch_step_size
+        self.lr_sch_gamma = lr_sch_gamma
+        assert self.lr_scheduler in [CosineAnnealingLR.__name__, StepLR.__name__, ExponentialLR.__name__, ReduceLROnPlateau.__name__], 'Unknown LR Scheduler!'
         
         if self.mode == 'grayscale':
             # Regression task
@@ -70,6 +74,14 @@ class Image2ImageModule(pl.LightningModule):
     def validation_step(self, batch, batch_idx: int) -> None:
 
         img, traj = batch
+        # maxy = img.max()
+        # miny = img.min()
+        # import matplotlib.pyplot as plt
+        # for img_idx in img:
+        #     img_np = img_idx.transpose(0,1).transpose(1, 2).cpu().detach().numpy()
+            
+        #     plt.imshow(img_np)
+
         img = img.float()
         traj_pred = self.forward(img)['out']
 
@@ -90,8 +102,22 @@ class Image2ImageModule(pl.LightningModule):
     
     def configure_optimizers(self):
         opt = Adam(self.net.parameters(), lr = self.learning_rate)
-        # TODO implement other schedulers
-        sch = CosineAnnealingLR(opt, T_max = 10)
+        if self.lr_scheduler == CosineAnnealingLR.__name__:
+            sch = CosineAnnealingLR(opt, T_max = self.lr_sch_step_size)
+        elif self.lr_scheduler == StepLR.__name__:
+            sch = StepLR(opt, step_size=self.lr_sch_step_size, gamma=self.lr_sch_gamma)
+        elif self.lr_scheduler == ExponentialLR.__name__:
+            sch = ExponentialLR(opt, gamma=0.9)
+        elif self.lr_scheduler == ReduceLROnPlateau.__name__:
+            sch = ReduceLROnPlateau(opt, factor=self.lr_sch_gamma)
+            # Because of a weird issue with ReduceLROnPlateau, the monitored value needs to be returned... See https://github.com/PyTorchLightning/pytorch-lightning/issues/4454
+            return {
+            'optimizer': opt,
+            'lr_scheduler': sch,
+            'monitor': 'val_loss'
+        }
+        else:
+            raise NotImplementedError('Scheduler has not been implemented yet!')
         return [opt], [sch]
 
     # def configure_callbacks(self):

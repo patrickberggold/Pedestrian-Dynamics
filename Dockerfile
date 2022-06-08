@@ -33,7 +33,7 @@ RUN python3.8 -m venv /home/venv/python38_torch
 RUN . /home/venv/python38_torch/bin/activate && pip install \
     numpy h5py torch scikit-image torchvision torchaudio torchsummary \
     pandas dill scipy ncls orjson tqdm matplotlib seaborn tensorboardX tensorboard \
-    opencv-python glob2 pyyaml easydict pytorch-lightning optuna ezdxf \
+    opencv-python glob2 pyyaml easydict pytorch-lightning optuna ezdxf plotly -U kaleido\
     --extra-index-url https://download.pytorch.org/whl/cu115
 
 RUN echo "alias activate_venv='. /home/venv/python38_torch/bin/activate'" >> ~/.bashrc
