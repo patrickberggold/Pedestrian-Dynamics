@@ -10,10 +10,6 @@ from matplotlib.colors import ListedColormap, LinearSegmentedColormap
 import h5py
 from skimage.draw import line
 
-frs = []
-gvals = []
-rvals = []
-
 # Input: current point coordinate, min floorplan coord, max floorplan coord, min resolution coord, max resolution coord -> output: projected coordinated
 def linear_interpolation(curr_point_or, lim_min_or, lim_max_or, lim_min_proj, lim_max_proj):
     return lim_min_proj + (curr_point_or - lim_min_or) * (lim_max_proj - lim_min_proj) / (lim_max_or - lim_min_or)
@@ -64,11 +60,30 @@ def get_color_from_array(index, max_index, return_in_cv2: bool = False):
 
     color_array = np.array([r_val, g_val, b_val])
 
-    frs.append(fr)
-    gvals.append(g_val)
-    rvals.append(r_val)
-
     return color_array.astype('float64')
+
+def get_color_from_pedId(id, num_agents = 40):
+    id = int(id)
+    if id < 5:
+        color = np.array([138, 255, 0])
+    elif 5 <= id < 10:
+        color = np.array([0, 255, 171])
+    elif 10 <= id < 15:
+        color = np.array([0, 255, 255])
+    elif 15 <= id < 20:
+        color = np.array([0, 160, 255])
+    elif 20 <= id < 25:
+        color = np.array([0, 57, 255])
+    elif 25 <= id < 30:
+        color = np.array([109, 0, 255])
+    elif 30 <= id < 35:
+        color = np.array([185, 0, 255])
+    elif 35 <= id <= 40:
+        color = np.array([255, 0, 213])
+    else:
+        raise NotImplementedError
+
+    return color.astype('float64')
 
 def get_customized_colormap():
 
@@ -105,12 +120,18 @@ if not os.path.isdir(HDF5_COLOR_TRAJ_PATH): os.mkdir(HDF5_COLOR_TRAJ_PATH)
 HDF5_TRAJ_MASK_PATH = 'C:\\Users\\ga78jem\\Documents\\Revit\\HDF5_GT_TIMESTAMP_MASKS_resolution_800_800'
 if not os.path.isdir(HDF5_TRAJ_MASK_PATH): os.mkdir(HDF5_TRAJ_MASK_PATH)
 
+HDF5_TIME_AND_ID_MASK_PATH = 'C:\\Users\\ga78jem\\Documents\\Revit\\HDF5_GT_TIME_AND_ID_MASKS_resolution_800_800'
+if not os.path.isdir(HDF5_TIME_AND_ID_MASK_PATH): os.mkdir(HDF5_TIME_AND_ID_MASK_PATH)
+
 for floorplan_folder in os.listdir(HDF5_ROOT_FOLDER):
     h5_img_traj_floorplan_folder = os.path.join(HDF5_COLOR_TRAJ_PATH, floorplan_folder)
     if not os.path.isdir(h5_img_traj_floorplan_folder): os.mkdir(h5_img_traj_floorplan_folder)
 
     h5_img_ts_mask_floorplan_folder = os.path.join(HDF5_TRAJ_MASK_PATH, floorplan_folder)
     if not os.path.isdir(h5_img_ts_mask_floorplan_folder): os.mkdir(h5_img_ts_mask_floorplan_folder)
+
+    h5_img_ts_and_id_mask_floorplan_folder = os.path.join(HDF5_TIME_AND_ID_MASK_PATH, floorplan_folder)
+    if not os.path.isdir(h5_img_ts_and_id_mask_floorplan_folder): os.mkdir(h5_img_ts_and_id_mask_floorplan_folder)
 
     print(f'Drawing trajectories (RGB and float masks) into {floorplan_folder}...')
 
@@ -124,7 +145,9 @@ for floorplan_folder in os.listdir(HDF5_ROOT_FOLDER):
         resolution_height, resolution_width  = resolutions[0], resolutions[1]
 
         trajectory_mask = np.zeros((resolution_width, resolution_height))
+        trajectory_t_an_id_mask = np.zeros((resolution_width, resolution_height, 2))
         trajectory2timestamp = {}
+        trajectory2timestamp_and_id = {}
 
         revit_img_path = os.path.join(REVIT_ROOT_FOLDER, floorplan_folder, f'img_variations_resolution_{resolution_height}_{resolution_width}')
         assert os.path.isdir(revit_img_path)
@@ -155,23 +178,23 @@ for floorplan_folder in os.listdir(HDF5_ROOT_FOLDER):
             ] for line in lines[1:]]
 
         # first sort after id, then after timestamp
-        pedestrian_trajs.sort(key=lambda x: (x[1], x[0]))
-
-        pedestrians_by_id = {}
-        for ped in pedestrian_trajs:
-            if ped[1] in pedestrians_by_id:
-                pedestrians_by_id[ped[1]].append([ped[0], ped[2], ped[3]])
-            else:
-                pedestrians_by_id.update({ped[1]: [[ped[0], ped[2], ped[3]]]})                
+        # pedestrian_trajs.sort(key=lambda x: (x[1], x[0]))
+        pedestrian_trajs.sort(key=lambda x: (x[0], x[1]))
 
         max_time = max([ped[0] for ped in pedestrian_trajs])
         interval_length = 0.5
         num_intervals = int(max_time/interval_length)
 
-        colors_by_timestamp = {i*interval_length: get_color_from_array(i, MAX_TIMESTAMPS) for i in range(1,num_intervals+1)}
-        # continue
-
         if maximum_overall_time < max_time: maximum_overall_time = max_time
+
+        colors_by_timestamp = {i*interval_length: get_color_from_array(i, MAX_TIMESTAMPS) for i in range(1,num_intervals+1)}
+
+        pedestrians_by_id = {}
+        for ped in pedestrian_trajs:
+            if ped[1]+1 in pedestrians_by_id:
+                pedestrians_by_id[ped[1]+1].append([ped[0], ped[2], ped[3]])
+            else:
+                pedestrians_by_id.update({ped[1]+1: [[ped[0], ped[2], ped[3]]]})
 
         for pedId in pedestrians_by_id:
             for i in range(1, len(pedestrians_by_id[pedId])):
@@ -180,37 +203,60 @@ for floorplan_folder in os.listdir(HDF5_ROOT_FOLDER):
                 
                 # Create lines in RGB image
                 color = colors_by_timestamp[pedestrians_by_id[pedId][i][0]]
-                cv2.line(img, (x_start, y_start), (x_end, y_end), (color), thickness=1) # cv2 origin: upper left
+                # cv2.line(img, (x_start, y_start), (x_end, y_end), (color), thickness=1) # cv2 origin: upper left
                 
                 # Create trajectory-timestamped image mask
                 time_start, time_end = pedestrians_by_id[pedId][i-1][0], pedestrians_by_id[pedId][i][0]
                 coord_line = list(zip(*line(*(x_start, y_start), *(x_end, y_end))))
                 timestamp_line = [linear_interpolation(i, 0, len(coord_line), time_start, time_end) for i in range(len(coord_line))]
-                trajectory2timestamp.update({coord: timestamp for (coord, timestamp) in zip(coord_line, timestamp_line)})
+                # trajectory2timestamp.update({coord: timestamp for (coord, timestamp) in zip(coord_line, timestamp_line)})
+                for (coord, timestamp) in zip(coord_line, timestamp_line):
+                    if coord not in trajectory2timestamp_and_id:
+                        # update only timestamp
+                        trajectory2timestamp.update({coord: timestamp})
+                        # update timestamp and pedestrian id
+                        trajectory2timestamp_and_id.update({coord: [timestamp, pedId]})
+                    else:
+                        current_ts = trajectory2timestamp_and_id[coord][0]
+                        if timestamp > trajectory2timestamp_and_id[coord][0]:
+                            # update only timestamp
+                            trajectory2timestamp.update({coord: timestamp})
+                            # update timestamp and pedestrian id
+                            trajectory2timestamp_and_id.update({coord: [timestamp, pedId]})
+                        elif timestamp == trajectory2timestamp_and_id[coord][0]:
+                            raise ValueError('Two trajectories cannot be at same place at the same time!')
+                        else:
+                            # if pedId's timestamp smaller and at the same place --> don't overwrite
+                            continue
 
-        # Color-decoding the timestamps with respect to the maximum timestamp in the dataset
-        # trajectory_mask_img = np.zeros((resolution_width, resolution_height, 3))
-        # timestamp2color = {coord: get_color_from_array(trajectory2timestamp[coord], MAX_TIME) for coord in trajectory2timestamp}
-        # for coord in timestamp2color:
-            # trajectory_mask_img[coord[1], coord[0]] = timestamp2color[coord]
-
-        # trajectory_mask[non_zero_coords[:,0], non_zero_coords[:,1]] = np.array([255, 255, 255])
+        # consistency check
+        for key in trajectory2timestamp_and_id:
+            assert trajectory2timestamp_and_id[key][0] == trajectory2timestamp[key]
 
         trajectory_coord_list = np.array(list(trajectory2timestamp.keys()))
         # Assign times to coordinates inside mask
         trajectory_mask[trajectory_coord_list[:,1], trajectory_coord_list[:,0]] = np.array(list(trajectory2timestamp.values()))
-        # val = trajectory_mask[trajectory_coord_list[:,1], trajectory_coord_list[:,0]]
 
-        # new_img = np.zeros((800,800,3))
-        # for x in range(800):
-        #     for y in range(800):
-        #         col_val = new_img[x,y]
-        #         if (x,y) in trajectory2timestamp:
-        #             new_col = get_color_from_array(trajectory2timestamp[(x,y)], MAX_TIME)
-        #             new_img[y,x] = get_color_from_array(trajectory2timestamp[(x,y)], MAX_TIME)
+        # Assign times and ids to coordinates inside mask
+        trajectory_t_an_id_mask[trajectory_coord_list[:,1], trajectory_coord_list[:,0]] = np.array(list(trajectory2timestamp_and_id.values()))
+    
+        # traj = trajectory_t_an_id_mask[:,:,1].squeeze()
+        # non_zeros = np.argwhere(traj > 0)
+        # for coord in non_zeros:
+        #     id = traj[coord[0], coord[1]]
+        #     color = get_color_from_pedId(id)
+        #     # ts = traj[coord[0], coord[1]]
+        #     #color = get_color_from_array(ts, MAX_TIME)
+        #     img[coord[0], coord[1]] = color
+        # plt.imshow(img, vmin=0, vmax=255)
 
-        # plt.imshow(new_img.astype('uint8'), vmin=0, vmax=255)
-        
+        # Color-decoding the timestamps with respect to the maximum timestamp in the dataset
+        # trajectory_mask_img = np.zeros((resolution_width, resolution_height, 3))
+        # timestamp2color = {coord: get_color_from_array(trajectory2timestamp_and_id[coord][0], MAX_TIME) for coord in trajectory2timestamp_and_id}
+        # for coord in timestamp2color:
+        #     img[coord[1], coord[0]] = timestamp2color[coord]
+        # plt.imshow(img, vmin=0, vmax=255)
+
         # cv2.imshow('Image', img)
         # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) # cv2 reads and writes in BGR fomat, not RGB
         
@@ -218,19 +264,25 @@ for floorplan_folder in os.listdir(HDF5_ROOT_FOLDER):
         # plt.imshow(img, vmin=0, vmax=255)
 
         # Store RGB images as JPEG
-        revit_img_variation_filepath = os.path.join(revit_img_path, variation_image.replace('HDF5_', '').replace('.h5', '_gt_traj.jpeg'))
-        plt.imsave(revit_img_variation_filepath, img, vmin=0, vmax=255)
+        # revit_img_variation_filepath = os.path.join(revit_img_path, variation_image.replace('HDF5_', '').replace('.h5', '_gt_traj.jpeg'))
+        # plt.imsave(revit_img_variation_filepath, img, vmin=0, vmax=255)
 
         # Store RGB images as HDF5
-        h5_img_traj_filepath = os.path.join(h5_img_traj_floorplan_folder, variation_image)
-        hf_im = h5py.File(h5_img_traj_filepath, 'w')
-        hf_im.create_dataset('img', data=img)
-        hf_im.close()
+        # h5_img_traj_filepath = os.path.join(h5_img_traj_floorplan_folder, variation_image)
+        # hf_im = h5py.File(h5_img_traj_filepath, 'w')
+        # hf_im.create_dataset('img', data=img)
+        # hf_im.close()
 
         # Store trajectory masks images as HDF5
-        h5_img_ts_mask_filepath = os.path.join(h5_img_ts_mask_floorplan_folder, variation_image)
-        hf_mk = h5py.File(h5_img_ts_mask_filepath, 'w')
-        hf_mk.create_dataset('img', data=trajectory_mask)
+        # h5_img_ts_mask_filepath = os.path.join(h5_img_ts_mask_floorplan_folder, variation_image)
+        # hf_mk = h5py.File(h5_img_ts_mask_filepath, 'w')
+        # hf_mk.create_dataset('img', data=trajectory_mask)
+        # hf_mk.close()
+
+        # Store timestamp and id masks images as HDF5
+        h5_img_ts_and_id_mask_filepath = os.path.join(h5_img_ts_and_id_mask_floorplan_folder, variation_image)
+        hf_mk = h5py.File(h5_img_ts_and_id_mask_filepath, 'w')
+        hf_mk.create_dataset('img', data=trajectory_t_an_id_mask)
         hf_mk.close()
 
         # Visualize stored hdf5 file
