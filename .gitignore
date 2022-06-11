@@ -1,5 +1,7 @@
 __pycache__/
 .vscode/
-image_results/
+image_results*/
 lightning_logs/
 *.ckpt
+log.txt
+*.png

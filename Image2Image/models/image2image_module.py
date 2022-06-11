@@ -7,16 +7,17 @@ from models import deeplabv3_resnet50
 # from torchvision.models.segmentation.deeplabv3 import deeplabv3_resnet50
 
 class Image2ImageModule(pl.LightningModule):
-    def __init__(self, mode: str, learning_rate: float = 1e-3, lr_scheduler: str = CosineAnnealingLR.__name__, lr_sch_step_size: int = 10, lr_sch_gamma: float = 0.1):
+    def __init__(self, mode: str, learning_rate: float = 1e-3, lr_scheduler: str = StepLR.__name__, lr_sch_step_size: int = 10, lr_sch_gamma: float = 0.1, two_loss_fcts_param: float = 10., unfreeze_backbone_at_epoch: int = None):
         super(Image2ImageModule, self).__init__()
         
-        assert mode in ['grayscale', 'rgb', 'bool', 'segmentation'], 'Unknown mode setting!'
+        assert mode in ['grayscale', 'rgb', 'bool', 'segmentation', 'timeAndId'], 'Unknown mode setting!'
         
         self.mode = mode
         self.learning_rate = learning_rate
         self.lr_scheduler = lr_scheduler
         self.lr_sch_step_size = lr_sch_step_size
         self.lr_sch_gamma = lr_sch_gamma
+        self.unfreeze_backbone_at_epoch = unfreeze_backbone_at_epoch
         assert self.lr_scheduler in [CosineAnnealingLR.__name__, StepLR.__name__, ExponentialLR.__name__, ReduceLROnPlateau.__name__], 'Unknown LR Scheduler!'
         
         if self.mode == 'grayscale':
@@ -31,6 +32,10 @@ class Image2ImageModule(pl.LightningModule):
         elif self.mode == 'segmentation':
             # Classification
             self.output_channels = 5 # Classes: Bkg, 'unpassable', 'walkable area', 'spawn_zone', 'destination'
+        elif self.mode == 'timeAndId':
+            num_agents = 40
+            self.output_channels = 1 + 1 + num_agents # grayscale dim + background class + number of agents
+            self.two_loss_fcts_param = two_loss_fcts_param
         else:
             raise ValueError
 
@@ -65,8 +70,24 @@ class Image2ImageModule(pl.LightningModule):
 
         if self.mode == 'bool' or self.mode == 'segmentation':
             train_loss = F.cross_entropy(traj_pred, traj.long(), ignore_index = 250)
-        else:
+        elif self.mode == 'timeAndId':
+
+            # train_loss = F.cross_entropy(traj_pred, traj.long(), ignore_index = 250)
+
+            traj_pred_time = traj_pred[:, 0, :, :]
+            traj_pred_ids = traj_pred[:, 1:, :, :]
+            traj_time = traj[:, :, :, 0]
+            traj_ids = traj[:, :, :, 1]
+            loss_MSE = F.mse_loss(traj_pred_time, traj_time.float())
+            loss_CE = F.cross_entropy(traj_pred_ids, traj_ids.long(), ignore_index = 250)
+            
+            lambda_CE2MSE = 1.0 # lambda_CE2MSE = loss_MSE.item()/loss_CE.item()
+            train_loss = lambda_CE2MSE * loss_CE + loss_MSE
+        elif self.mode == 'grayscale' or self.mode == 'rgb':
+            # TODO how about I change the loss after a few epochs to only values >=  1?
             train_loss = F.mse_loss(traj_pred.squeeze(), traj.float())
+        else:
+            raise NotImplementedError('Mode not implemented!')
         
         self.log('loss', train_loss, on_step=False, on_epoch=True)
         return {'loss' : train_loss}
@@ -74,21 +95,27 @@ class Image2ImageModule(pl.LightningModule):
     def validation_step(self, batch, batch_idx: int) -> None:
 
         img, traj = batch
-        # maxy = img.max()
-        # miny = img.min()
-        # import matplotlib.pyplot as plt
-        # for img_idx in img:
-        #     img_np = img_idx.transpose(0,1).transpose(1, 2).cpu().detach().numpy()
-            
-        #     plt.imshow(img_np)
-
         img = img.float()
         traj_pred = self.forward(img)['out']
 
         if self.mode == 'bool' or self.mode == 'segmentation':
             val_loss = F.cross_entropy(traj_pred, traj.long(), ignore_index = 250)
-        else:
+        elif self.mode == 'timeAndId':
+
+            # val_loss = F.cross_entropy(traj_pred, traj.long(), ignore_index = 250)
+
+            traj_pred_time = traj_pred[:, 0, :, :]
+            traj_pred_ids = traj_pred[:, 1:, :, :]
+            traj_time = traj[:, :, :, 0]
+            traj_ids = traj[:, :, :, 1]
+            loss_MSE = F.mse_loss(traj_pred_time, traj_time.float())
+            loss_CE = F.cross_entropy(traj_pred_ids, traj_ids.long(), ignore_index = 250)
+            lambda_CE2MSE = 1.0 # lambda_CE2MSE = loss_MSE.item()/loss_CE.item()
+            val_loss = lambda_CE2MSE * loss_CE + loss_MSE
+        elif self.mode == 'grayscale' or self.mode == 'rgb':
             val_loss = F.mse_loss(traj_pred.squeeze(), traj.float())
+        else:
+            raise NotImplementedError('Mode not implemented!')
         
         self.log('val_loss', val_loss)
         return {'val_loss' : val_loss}
@@ -120,7 +147,19 @@ class Image2ImageModule(pl.LightningModule):
             raise NotImplementedError('Scheduler has not been implemented yet!')
         return [opt], [sch]
 
-    # def configure_callbacks(self):
-    #     early_stop = EarlyStopping(monitor="val_acc", mode="max")
-    #     checkpoint = ModelCheckpoint(monitor="val_loss")
-    #     return [early_stop, checkpoint]
+    def on_epoch_start(self) -> None:
+        # return super().on_epoch_start()
+        if self.unfreeze_backbone_at_epoch:
+            if self.current_epoch == 0:
+                # freeze backbone weights
+                for idx, child in enumerate(self.net.children()):
+                    if idx == 0:
+                        for param in child.parameters():
+                            param.requires_grad = False
+            elif self.current_epoch == self.unfreeze_backbone_at_epoch:
+                print(f"\nUNFREEZING BACKBONE AFTER {self.unfreeze_backbone_at_epoch} EPOCHS\n")
+                # unfreeze backbone weights
+                for idx, child in enumerate(self.net.children()):
+                    if idx == 0:
+                        for param in child.parameters():
+                            param.requires_grad = True

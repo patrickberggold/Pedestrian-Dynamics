@@ -1,3 +1,4 @@
+import imp
 import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
@@ -6,9 +7,8 @@ import os
 import random
 import h5py
 from helper import SEP
-
-# TODO OPEN QUESTION
-# What should be the input? RGB image with colored regions (so RGB format) or pixel annotations (so 'greyscale' values from 0 to num_classes)
+import matplotlib.pyplot as plt
+from helper import get_color_from_array
 
 class semantic_dataset(Dataset):
     def __init__(self, split = 'train', transform = None):
@@ -106,29 +106,16 @@ class semantic_dataset(Dataset):
         return files_list
 
 class img2img_dataset_traj_1D(Dataset):
-    def __init__(self, mode: str, img_paths: list, traj_paths: list, transform = None):
+    def __init__(self, mode: str, img_paths: list, traj_paths: list, transform = None, non_traj_vals: float = -5.):
 
         self.transform = transform
         self.img_paths = img_paths
         self.traj_paths = traj_paths
         self.mode = mode
+        self.non_traj_vals = non_traj_vals
 
-        assert mode in ['grayscale', 'rgb', 'bool'], 'Unknown mode setting!'
+        assert mode in ['grayscale', 'rgb', 'bool', 'timeAndId'], 'Unknown mode setting!'
         assert len(self.traj_paths) == len(self.img_paths), 'Length of image paths and trajectory paths do not match, something went wrong!'
-
-        # if self.split == 'train':
-        #     assert len(self.img_list) == len(self.traj_list)
-        #     self.img_list = [self.img_list[idx] for idx in indices[(test_split_index + val_split_index):]]
-        #     self.traj_list = [self.traj_list[idx] for idx in indices[(test_split_index + val_split_index):]]
-        # elif self.split == 'val':
-        #     assert len(self.img_list) == len(self.traj_list)
-        #     self.img_list = [self.img_list[idx] for idx in indices[test_split_index:(test_split_index + val_split_index)]]
-        #     self.traj_list = [self.traj_list[idx] for idx in indices[test_split_index:(test_split_index + val_split_index)]]
-        # elif self.split == 'test':
-        #     self.img_list = [self.img_list[idx] for idx in indices[:test_split_index]]
-        #     self.traj_list = [self.traj_list[idx] for idx in indices[:test_split_index]]
-        # else:
-        #     raise ValueError()
 
     def __len__(self):
         return(len(self.img_paths))
@@ -144,12 +131,12 @@ class img2img_dataset_traj_1D(Dataset):
         traj = np.array(h5py.File(traj_path, 'r').get('img'))
         
         if self.mode == 'grayscale':
-            # Scale timestamp values with respect to maximum timestamp value
             # SETTING 1
+            # Scale timestamp values with respect to maximum timestamp value
             # traj /= 89.5
             # traj[traj == 0.] = -0.02
             # SETTING 2
-            traj[traj == 0] = -5
+            traj[traj == 0] = self.non_traj_vals
             # If passed as numpy, trajectory does not get normalized
         elif self.mode == 'rgb':
             # TODO Maybe change/remove this once transforms switch from Normalization to something else
@@ -157,22 +144,42 @@ class img2img_dataset_traj_1D(Dataset):
                 traj = self.transform(traj)
         elif self.mode == 'bool':
             traj = traj.astype('bool').astype('float32')
-            
-            # non_zeros = np.argwhere(traj > 0.) # (25647 (614353
-            # traj[non_zeros[:,0], non_zeros[:,1]] = 1
+        elif self.mode == 'timeAndId':
+            # SETTING 1
+            # Scale timestamp values with respect to maximum timestamp value
+            # traj[:,:,0] /= 89.5
+            # traj[:,:,0][traj[:,:,0] == 0.] = -0.02
+            # SETTING 2
+            traj[:,:,0][traj[:,:,0] == 0] = self.non_traj_vals
+            # traj = traj[:,:,1]
 
-            # zeros = np.argwhere(traj <= 0.)
-            # traj[zeros[:,0], zeros[:,1]] = 0
+            # Visualize trajectory for checking correctness
+            # non_zeros = np.argwhere(traj[:,:,1] != 0.)
+            # # img[non_zeros[:,0], non_zeros[:,1]] = np.array([0, 0, 255])
+            # for coord in non_zeros:
+            #     id = traj[:,:,1][coord[0], coord[1]]
+            #     img[coord[0], coord[1]] = get_color_from_pedId(id)
+            # plt.imshow(img, vmin=0, vmax=255)
+
+            # # Generate random arrayas for testing forward pass
+            # traj = np.random.randint(0, high=41, size=(800,800))
+            # # Append random int-array for testing
+            # rand_int_array = np.random.randint(0, high=41, size=(800,800,1), dtype=int).astype('float32') # generates 800x800 random int array, min_val=0, max_val=40
+            # # assign zeros where no trajectories are...
+            # zeros_in_traj = np.argwhere(traj == -5.)
+            # rand_int_array[zeros_in_traj[:,0], zeros_in_traj[:,1]] = 0.
+            # traj = np.expand_dims(traj, 2)
+            # traj_app = np.concatenate((traj, rand_int_array), axis=2)
+            # traj = traj_app
+
+            # non_zeros = np.argwhere(traj > 0.)
+            # traj[non_zeros[:,0], non_zeros[:,1]] = 1
 
             # plt.imsave(f'test_GT_img_{idx}.jpeg', traj, vmin=0, vmax=255)
             # non_zeros = np.argwhere(traj != 0)
             # img[non_zeros[:,0], non_zeros[:,1]] = np.array([0, 0, 255])
             # plt.imsave(f'test_input_and_GT_{idx}.jpeg', img, vmin=0, vmax=255)
             
-            # mask = cv2.imread(self.mask_list[idx], cv2.IMREAD_GRAYSCALE)
-            # mask = cv2.resize(mask, (1242, 376))
-            # mask = self.encode_segmap(mask)
-            # assert(mask.shape == (376, 1242))
         
         # plot images to test correctness
         # plt.imsave(f'test_img_{idx}.jpeg', img, vmin=0, vmax=255)
@@ -184,4 +191,4 @@ class img2img_dataset_traj_1D(Dataset):
             # TODO transforms for trajs too at some point (e.g. for rotation, resizing):
             # traj = self.transform(traj)
 
-        return img, traj
+        return img, traj.astype('float32')

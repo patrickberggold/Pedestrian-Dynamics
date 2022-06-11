@@ -7,9 +7,9 @@ from .FloorplanDataset import img2img_dataset_traj_1D, semantic_dataset
 from helper import SEP
 
 class FloorplanDataModule(pl.LightningDataModule):
-    def __init__(self, mode: str, cuda_index: int, split: str = "train", batch_size: int = 4, splits: list = [0.7, 0.15, 0.15]):
+    def __init__(self, mode: str, cuda_index: int, split: str = "train", batch_size: int = 4, splits: list = [0.7, 0.15, 0.15], non_traj_vals: float = -5., num_workers: int = 0):
         super().__init__()
-        assert mode in ['grayscale', 'rgb', 'bool', 'segmentation'], 'Unknown mode setting!'
+        assert mode in ['grayscale', 'rgb', 'bool', 'segmentation', 'timeAndId'], 'Unknown mode setting!'
         self.mode = mode
         self.split = split
         self.batch_size = batch_size
@@ -19,6 +19,8 @@ class FloorplanDataModule(pl.LightningDataModule):
             # transforms.Normalize(mean=0, std=255)
         ])
         self.cuda_index = cuda_index
+        self.num_workers = num_workers
+        self.non_traj_vals = non_traj_vals
 
         self.set_data_paths(splits)
 
@@ -28,18 +30,21 @@ class FloorplanDataModule(pl.LightningDataModule):
             self.val_dataset = semantic_dataset(split='val', transform=self.transforms)
             self.test_dataset = semantic_dataset(split='test', transform=self.transforms)
         else:
-            self.train_dataset = img2img_dataset_traj_1D(self.mode, self.train_imgs_list, self.train_trajs_list, transform=self.transforms)
-            self.val_dataset = img2img_dataset_traj_1D(self.mode, self.val_imgs_list, self.val_trajs_list, transform=self.transforms)
-            self.test_dataset = img2img_dataset_traj_1D(self.mode, self.test_imgs_list, self.test_trajs_list, transform=self.transforms)
+            self.train_dataset = img2img_dataset_traj_1D(self.mode, self.train_imgs_list, self.train_trajs_list, transform=self.transforms, non_traj_vals=self.non_traj_vals)
+            self.val_dataset = img2img_dataset_traj_1D(self.mode, self.val_imgs_list, self.val_trajs_list, transform=self.transforms, non_traj_vals=self.non_traj_vals)
+            self.test_dataset = img2img_dataset_traj_1D(self.mode, self.test_imgs_list, self.test_trajs_list, transform=self.transforms, non_traj_vals=self.non_traj_vals)
 
     def train_dataloader(self):
-        return DataLoader(self.train_dataset, batch_size=self.batch_size)
+        return DataLoader(self.train_dataset, batch_size=self.batch_size, num_workers=self.num_workers)
 
     def val_dataloader(self):
-        return DataLoader(self.val_dataset, batch_size=self.batch_size)
+        return DataLoader(self.val_dataset, batch_size=self.batch_size, num_workers=self.num_workers)
 
     def test_dataloader(self):
         return DataLoader(self.test_dataset, batch_size=self.batch_size)
+
+    def set_non_traj_vals(self, new_val: float = -5.):
+        self.non_traj_vals = new_val
 
     # def predict_dataloader(self):
     #     return DataLoader(self.mnist_predict, batch_size=self.batch_size)
@@ -64,6 +69,8 @@ class FloorplanDataModule(pl.LightningDataModule):
             self.traj_path = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'HDF5_GT_TIMESTAMP_MASKS_resolution_800_800'])
         elif self.mode == 'rgb':
             self.traj_path = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'HDF5_GT_COLORED_TRAJ_resolution_800_800'])
+        elif self.mode == 'timeAndId':
+            self.traj_path = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'HDF5_GT_TIME_AND_ID_MASKS_resolution_800_800'])
         else:
             self.traj_path = None
 
