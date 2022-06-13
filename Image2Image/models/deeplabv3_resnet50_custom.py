@@ -45,14 +45,24 @@ class DeepLabV3(_SimpleSegmentationModel):
 
 
 class DeepLabHead(nn.Sequential):
-    def __init__(self, in_channels: int, num_classes: int) -> None:
-        super().__init__(
-            ASPP(in_channels, [12, 24, 36]),
-            nn.Conv2d(256, 256, 3, padding=1, bias=False),
-            nn.BatchNorm2d(256),
-            nn.ReLU(),
-            nn.Conv2d(256, num_classes, 1),
-        )
+    def __init__(self, in_channels: int, num_classes: int, relu_at_end: bool = False) -> None:
+        if not relu_at_end:
+            super().__init__(
+                ASPP(in_channels, [12, 24, 36]),
+                nn.Conv2d(256, 256, 3, padding=1, bias=False),
+                nn.BatchNorm2d(256),
+                nn.ReLU(),
+                nn.Conv2d(256, num_classes, 1),
+            )
+        else:
+            super().__init__(
+                ASPP(in_channels, [12, 24, 36]),
+                nn.Conv2d(256, 256, 3, padding=1, bias=False),
+                nn.BatchNorm2d(256),
+                nn.ReLU(),
+                nn.Conv2d(256, num_classes, 1),
+                nn.ReLU()
+            )
 
 
 class ASPPConv(nn.Sequential):
@@ -116,6 +126,7 @@ def _deeplabv3_resnet(
     backbone: resnet.ResNet,
     num_classes: int,
     aux: Optional[bool],
+    relu_at_end: bool = False
 ) -> DeepLabV3:
     return_layers = {"layer4": "out"}
     if aux:
@@ -123,7 +134,7 @@ def _deeplabv3_resnet(
     backbone = IntermediateLayerGetter(backbone, return_layers=return_layers)
 
     aux_classifier = FCNHead(1024, num_classes) if aux else None
-    classifier = DeepLabHead(2048, num_classes)
+    classifier = DeepLabHead(2048, num_classes, relu_at_end=relu_at_end)
     return DeepLabV3(backbone, classifier, aux_classifier)
 
 
@@ -156,6 +167,7 @@ def deeplabv3_resnet50(
     output_channels: int = 21,
     aux_loss: Optional[bool] = None,
     pretrained_backbone: bool = True,
+    relu_at_end: bool = False
 ) -> DeepLabV3:
     """Constructs a DeepLabV3 model with a ResNet-50 backbone.
 
@@ -172,7 +184,7 @@ def deeplabv3_resnet50(
         pretrained_backbone = False
 
     backbone = resnet.resnet50(pretrained=pretrained_backbone, replace_stride_with_dilation=[False, True, True])
-    model = _deeplabv3_resnet(backbone, output_channels, aux_loss)
+    model = _deeplabv3_resnet(backbone, output_channels, aux_loss, relu_at_end=relu_at_end)
 
     if pretrained:
         arch = "deeplabv3_resnet50_coco"

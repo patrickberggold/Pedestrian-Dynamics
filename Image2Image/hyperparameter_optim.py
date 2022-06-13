@@ -9,12 +9,22 @@ from helper import SEP
 import json
  
 ROOT_PATH = SEP.join(['Image2Image', 'Optimization'])
-if not os.path.isdir: os.mkdir(ROOT_PATH)
+OPTIMIZATION_NAME = 'ReLU_activation_at_end__l1_loss'
+FOLDER_NAME = os.path.join(ROOT_PATH, OPTIMIZATION_NAME)
+if not os.path.isdir(FOLDER_NAME): os.mkdir(FOLDER_NAME)
 
 MODEL_FILENAME = 'model_optuna_optim___non_traj_vals__unfreeze.ckpt'
-LOG_FILENAME = os.path.join(ROOT_PATH, 'log.txt')
+LOG_FILENAME = os.path.join(FOLDER_NAME, 'log.txt')
 
-def hyperparameter_optimization(mode: str, datamodule: pl.LightningDataModule, n_trials: int, epochs_per_trial: int, cuda_device: int = 0, limit_train_batches = None, limit_val_batches = None):
+def hyperparameter_optimization(
+    mode: str, 
+    datamodule: pl.LightningDataModule, 
+    n_trials: int, 
+    epochs_per_trial: int, 
+    cuda_device: int = 0, 
+    limit_train_batches = None, 
+    limit_val_batches = None
+    ):
 
     assert mode in ['grayscale', 'rgb', 'bool', 'segmentation', 'timeAndId'], 'Unknown mode setting!'
 
@@ -28,18 +38,18 @@ def hyperparameter_optimization(mode: str, datamodule: pl.LightningDataModule, n
         # lr_scheduler = trial.suggest_categorical("sch", ['CosineAnnealingLR', 'StepLR', 'ReduceLROnPlateau'])
         # lr_sch_step_size = trial.suggest_int("step_size", 4, 12)
         lr_sch_gamma = trial.suggest_float("gamma", 0.3, 0.9)
-        non_traj_vals = trial.suggest_float("ntv", -7., -0.5)
+        # non_traj_vals = trial.suggest_float("ntv", -7., -0.5)
         # unfreeze_backbone_epoch = trial.suggest_categorical
 
-        module = Image2ImageModule(mode=mode, learning_rate=learning_rate, lr_sch_step_size=5, lr_sch_gamma=lr_sch_gamma, unfreeze_backbone_at_epoch=8)
+        module = Image2ImageModule(mode=mode, learning_rate=learning_rate, lr_sch_step_size=5, lr_sch_gamma=lr_sch_gamma, unfreeze_backbone_at_epoch=8, relu_at_end = True, loss_fct='l1_loss')
 
-        datamodule.set_non_traj_vals(new_val = non_traj_vals)
+        datamodule.set_non_traj_vals(new_val = 0.)
 
         # TODO implement feedback when trials are pruned
-        hyperparameters = dict(lr=learning_rate, ntv=non_traj_vals, gamma=lr_sch_gamma)
+        hyperparameters = dict(lr=learning_rate, gamma=lr_sch_gamma)
 
         start_trial_string = f'\n#################################################################################################################' + \
-            '\nSTARTING NEW TRIAL {trial.number+1}/{n_trials} WITH {epochs_per_trial} EPOCHS PER TRIAL with:\n'
+            f'\nSTARTING NEW TRIAL {trial.number+1}/{n_trials} WITH {epochs_per_trial} EPOCHS PER TRIAL with:\n'
         for key in hyperparameters:
             start_trial_string += f'{key}: {hyperparameters[key]}\n'
             trial.set_user_attr(key=key, value = hyperparameters[key])
@@ -90,12 +100,12 @@ def hyperparameter_optimization(mode: str, datamodule: pl.LightningDataModule, n
             
             # Save hyperparameters in json format
             jsonString = json.dumps(json_hyperparams)
-            jsonFile = open(os.path.join(ROOT_PATH, 'hyperparameters_'+MODEL_FILENAME.replace('.ckpt', '.json')), 'w')
+            jsonFile = open(os.path.join(FOLDER_NAME, 'hyperparameters_'+MODEL_FILENAME.replace('.ckpt', '.json')), 'w')
             jsonFile.write(jsonString)
             jsonFile.close()
             
             # Save best model in ckpt format
-            torch.save(trial.user_attrs['model_state_dict'], os.path.join(ROOT_PATH, MODEL_FILENAME))
+            torch.save(trial.user_attrs['model_state_dict'], os.path.join(FOLDER_NAME, MODEL_FILENAME))
 
     pruner = optuna.pruners.MedianPruner()
     study = optuna.create_study(direction="minimize", pruner=pruner)
@@ -126,7 +136,7 @@ def hyperparameter_optimization(mode: str, datamodule: pl.LightningDataModule, n
             log_file.write(string_5)
 
     fig = optuna.visualization.plot_slice(study, params=[key for key in best_trial.user_attrs if key != 'model_state_dict'])
-    fig.write_image(os.path.join(ROOT_PATH, 'params.png'))
+    fig.write_image(os.path.join(FOLDER_NAME, 'params.png'))
 
     string_6 = '\nHyperparameter importances:'
     print(string_6)

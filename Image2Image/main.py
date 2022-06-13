@@ -18,25 +18,25 @@ MODE = 'grayscale' # implemented: grayscale, rgb, bool, timeAndId
 BATCH_SIZE = 4
 
 do_training = False
-do_hyperparameter_optim = True
+do_hyperparameter_optim = False
 
-datamodule = FloorplanDataModule(mode = MODE, cuda_index = CUDA_DEVICE, batch_size = BATCH_SIZE)
+datamodule = FloorplanDataModule(mode = MODE, cuda_index = CUDA_DEVICE, batch_size = BATCH_SIZE, non_traj_vals=0.)
 
 if do_hyperparameter_optim:
 
-    best_trial = hyperparameter_optimization(mode = MODE, datamodule = datamodule, n_trials = 2, epochs_per_trial = 2, cuda_device = CUDA_DEVICE, limit_train_batches = 2, limit_val_batches = 2)
+    best_trial = hyperparameter_optimization(mode = MODE, datamodule = datamodule, n_trials = 35, epochs_per_trial = 25, cuda_device = CUDA_DEVICE, limit_train_batches = None, limit_val_batches = None)
 
     if not do_training:
         quit()
 
 if do_training:
 
-    model = Image2ImageModule(mode=MODE)
+    model = Image2ImageModule(mode=MODE, relu_at_end=True)
     # print(model)
 
     model_checkpoint = ModelCheckpoint(
         dirpath = SEP.join(['Image2Image','checkpoints', 'checkpoints_DeepLab4Img2Img']),
-        filename = 'model_grayscale_scale_-5_89.5_ONLY_CLASSIF_UnfreezeBackbone10eps_{epoch}-{step}',
+        filename = 'model_grayscale_scale_RELUatEnd_BBunfreezeAt8_CONTI_L4_{epoch}-{step}',
         save_top_k = 1,
         verbose = True, 
         monitor = 'val_loss',
@@ -46,7 +46,7 @@ if do_training:
     trainer = pl.Trainer(
         gpus = [CUDA_DEVICE], 
         devices=f'cuda:{str(CUDA_DEVICE)}', 
-        max_epochs = 70, 
+        max_epochs = 100, 
         # checkpoint_callback = [checkpoint_callback], 
         callbacks=[EarlyStopping(monitor="val_loss", mode="min", patience=8), LearningRateMonitor(logging_interval='epoch'), model_checkpoint],
         limit_train_batches=None,
@@ -56,18 +56,19 @@ if do_training:
 
     start_training_time = time.time()
     trainer.fit(model, datamodule=datamodule)
-    print(f'Training took {(time.time() - start_training_time)/60./(model.current_epoch+1):.3f} minutes per epoch...')
     # automatically restores model, epoch, step, LR schedulers, apex, etc...
-    # trainer.fit(model, ckpt_path="some/path/to/my_checkpoint.ckpt")
+    # IMPORTANT: this will delete the old checkpoint!!
+    # trainer.fit(model, datamodule=datamodule, ckpt_path="Image2Image\checkpoints\checkpoints_DeepLab4Img2Img\model_grayscale_scale_RELUatEnd_BBunfreezeAt8_epoch=51-step=8112.ckpt")
+    print(f'Training took {(time.time() - start_training_time)/60./(model.current_epoch+1):.3f} minutes per epoch...')
 
     quit()
 
 # Load stored model: keys in state_dict need to be adjusted
-# CKPT_PATH = SEP.join(['Image2Image', 'checkpoints', 'checkpoints_DeepLab4Img2Img', 'model_graysclae_scale_-5_89.5_UnfreezeBackbone10eps_epoch=31-step=4992.ckpt']) # model_rgb_epoch=10-step=1958.ckpt
-# state_dict = OrderedDict([(key.replace('net.', ''), tensor) if key.startswith('net.') else (key, tensor) for key, tensor in torch.load(CKPT_PATH)['state_dict'].items()])
-CKPT_PATH = SEP.join(['Image2Image', 'Optimization', 'model_optuna_optim___non_traj_vals__unfreeze.ckpt'])
-state_dict = torch.load(CKPT_PATH)
-model = Image2ImageModule(mode=MODE)
+CKPT_PATH = SEP.join(['Image2Image', 'checkpoints', 'checkpoints_DeepLab4Img2Img', 'model_grayscale_scale_RELUatEnd_BBunfreezeAt8_CONTI_L4_epoch=10-step=1716.ckpt'])
+state_dict = OrderedDict([(key.replace('net.', ''), tensor) if key.startswith('net.') else (key, tensor) for key, tensor in torch.load(CKPT_PATH)['state_dict'].items()])
+# CKPT_PATH = SEP.join(['Image2Image', 'Optimization', 'ReLU_activation_at_end__l1_loss', 'model_optuna_optim___non_traj_vals__unfreeze.ckpt'])
+# state_dict = torch.load(CKPT_PATH)
+model = Image2ImageModule(mode=MODE, relu_at_end=True)
 model.net.load_state_dict(state_dict)
 
 # This only works when there are no required positional arguments that need to passed to the constructor
@@ -75,7 +76,7 @@ model.net.load_state_dict(state_dict)
 model.to(f'cuda:{CUDA_DEVICE}')
 model.net.eval()
 
-datamodule.set_non_traj_vals(new_val=-0.52051)
+datamodule.set_non_traj_vals(new_val=0.0)
 
 datamodule.setup(stage='test')
 trainloader = datamodule.train_dataloader()
@@ -114,12 +115,20 @@ for idx, batch in enumerate(testloader):
             gt_colors_from_timestamps = [get_color_from_array(traj_np[x, y], 89.5)/255. for x, y in np.argwhere(traj_np >= 1.0)]
             img_gt[np.argwhere(traj_np>= 1.0)[:,0], np.argwhere(traj_np >= 1.0)[:,1]] = np.array(gt_colors_from_timestamps)
 
-            # 3D plot
+            # 3D plot pred
             # fig = plt.figure(figsize=(6,6))
             # ax = fig.add_subplot(111, projection='3d')
             # X,Y = np.meshgrid(np.arange(800), np.arange(800))
             # ax.plot_surface(X, Y, traj_pred_np)
             # plt.show()
+
+            # 3D plot GT
+            # fig = plt.figure(figsize=(6,6))
+            # ax = fig.add_subplot(111, projection='3d')
+            # X,Y = np.meshgrid(np.arange(800), np.arange(800))
+            # ax.plot_surface(X, Y, traj_np)
+            # plt.show()
+
         if MODE == 'timeAndId':
             # Get GT floorplan RGB
             img_gt = img[i].transpose(0,1).transpose(1, 2).detach().cpu().numpy()#*255
