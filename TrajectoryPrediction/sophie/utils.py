@@ -8,7 +8,7 @@ import torch
 from constants import *
 
 def get_dset_path(dset_name, dset_type):
-    return os.path.join('datasets', dset_name, dset_type)
+    return os.path.join('C:\\Users\\Remotey\\Documents\\Pedestrian-Dynamics\\TrajectoryPrediction\\sophie\\datasets', dset_name, dset_type)
 
 def relative_to_abs(rel_traj, start_pos):
     rel_traj = rel_traj.permute(1, 0, 2)

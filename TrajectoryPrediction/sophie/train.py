@@ -18,6 +18,7 @@ from models import TrajectoryGenerator, TrajectoryDiscriminator
 
 from constants import *
 
+# Very nice init function
 def init_weights(m):
     classname = m.__class__.__name__
     if classname.find('Linear') != -1:
@@ -41,7 +42,7 @@ def main():
     print('There are {} iterations per epoch'.format(iterations_per_epoch))
 
     generator = TrajectoryGenerator()
-    generator.apply(init_weights)
+    generator.apply(init_weights) # apply() within torch implementation, super useful for init weights
     generator.type(float_dtype).train()
     print('Here is the generator:')
     print(generator)
@@ -65,7 +66,7 @@ def main():
         epoch += 1
         print('Starting epoch {}'.format(epoch))
         for batch in train_loader:
-
+            # batch = obs_traj, pred_traj_gt, obs_traj_rel, pred_traj_gt_rel, vgg_list
             if d_steps_left > 0:
                 losses_d = discriminator_step(batch, generator,
                                               discriminator, gan_d_loss,
@@ -113,7 +114,7 @@ def main():
 
 def discriminator_step(batch, generator, discriminator, d_loss_fn, optimizer_d):
     
-    batch = [tensor.cuda() for tensor in batch]
+    batch = [tensor.cuda(CUDA_DEVICE) for tensor in batch]
     (obs_traj, pred_traj_gt, obs_traj_rel, pred_traj_gt_rel, vgg_list) = batch
     losses = {}
     loss = torch.zeros(1).to(pred_traj_gt)
@@ -143,7 +144,7 @@ def discriminator_step(batch, generator, discriminator, d_loss_fn, optimizer_d):
 
 def generator_step(batch, generator, discriminator, g_loss_fn, optimizer_g):
 
-    batch = [tensor.cuda() for tensor in batch]
+    batch = [tensor.cuda(CUDA_DEVICE) for tensor in batch]
     (obs_traj, pred_traj_gt, obs_traj_rel, pred_traj_gt_rel, vgg_list) = batch
     losses = {}
     loss = torch.zeros(1).to(pred_traj_gt)
@@ -198,7 +199,7 @@ def check_accuracy(loader, generator, discriminator, d_loss_fn, limit=False):
     generator.eval()
     with torch.no_grad():
         for batch in loader:
-            batch = [tensor.cuda() for tensor in batch]
+            batch = [tensor.cuda(CUDA_DEVICE) for tensor in batch]
             (obs_traj, pred_traj_gt, obs_traj_rel, pred_traj_gt_rel, vgg_list) = batch
 
             pred_traj_fake_rel = generator(obs_traj, obs_traj_rel, vgg_list)

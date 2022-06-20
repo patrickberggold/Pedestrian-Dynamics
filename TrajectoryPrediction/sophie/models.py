@@ -17,7 +17,7 @@ def make_mlp(dim_list):
     return nn.Sequential(*layers)
 
 def get_noise(shape):
-    return torch.randn(*shape).cuda()
+    return torch.randn(*shape).cuda(CUDA_DEVICE)
 
 class Encoder(nn.Module):
     def __init__(self):
@@ -26,12 +26,12 @@ class Encoder(nn.Module):
         self.h_dim = H_DIM
         self.embedding_dim = EMBEDDING_DIM
 
-        self.encoder = nn.LSTM(self.embedding_dim, self.h_dim, 1)
-        self.spatial_embedding = nn.Linear(2, self.embedding_dim)
+        self.encoder = nn.LSTM(self.embedding_dim, self.h_dim, 1).cuda(CUDA_DEVICE)
+        self.spatial_embedding = nn.Linear(2, self.embedding_dim).cuda(CUDA_DEVICE)
 
     def init_hidden(self, batch):
-        h = torch.zeros(1, batch, self.h_dim).cuda()
-        c = torch.zeros(1, batch, self.h_dim).cuda()
+        h = torch.zeros(1, batch, self.h_dim).cuda(CUDA_DEVICE)
+        c = torch.zeros(1, batch, self.h_dim).cuda(CUDA_DEVICE)
         return (h, c)
 
     def forward(self, obs_traj):
@@ -40,7 +40,7 @@ class Encoder(nn.Module):
         npeds = obs_traj.size(1)
         total = npeds * (MAX_PEDS if padded else 1)
 
-        obs_traj_embedding = self.spatial_embedding(obs_traj.view(-1, 2))
+        obs_traj_embedding = self.spatial_embedding(obs_traj.reshape(-1, 2))
         obs_traj_embedding = obs_traj_embedding.view(-1, total, self.embedding_dim)
         state = self.init_hidden(total)
         output, state = self.encoder(obs_traj_embedding, state)
@@ -98,19 +98,20 @@ class PhysicalAttention(nn.Module):
 
         mlp_pre_dim = self.embedding_dim + self.D_down
         mlp_pre_attn_dims = [mlp_pre_dim, 512, self.bottleneck_dim]
-        self.mlp_pre_attn = make_mlp(mlp_pre_attn_dims)
+        self.mlp_pre_attn = make_mlp(mlp_pre_attn_dims).to(CUDA_DEVICE)
 
         self.attn = nn.Linear(self.L*self.bottleneck_dim, self.L)
 
     def forward(self, vgg, end_pos):
-
+        # vgg IN: torch.tensor(n_ped_per_seq*batch_size x 15 x 15 x 512)
+        # end_pos IN: torch.tensor(batch_size*n_ped_per_seq, 64, 2)
         npeds = end_pos.size(0)
-        end_pos = end_pos[:, 0, :]
+        end_pos = end_pos[:, 0, :] # end positions of current (considered) peds in the sequence, eject their respective neighbors
         curr_rel_embedding = self.spatial_embedding(end_pos)
         curr_rel_embedding = curr_rel_embedding.view(-1, 1, self.embedding_dim).repeat(1, self.L, 1)
 
-        vgg = vgg.view(-1, self.D)
-        features_proj = self.pre_att_proj(vgg)
+        vgg_new = vgg.view(-1, self.D)
+        features_proj = self.pre_att_proj(vgg_new) # TODO maybe it is problematic that I am mixing layouts here... go through each layout separately?
         features_proj = features_proj.view(-1, self.L, self.D_down)
 
         mlp_h_input = torch.cat([features_proj, curr_rel_embedding], dim=2)
@@ -173,14 +174,14 @@ class TrajectoryGenerator(nn.Module):
         self.bottleneck_dim = BOTTLENECK_DIM
         self.noise_dim = NOISE_DIM
 
-        self.encoder = Encoder()
-        self.sattn = SocialAttention()
-        self.pattn = PhysicalAttention()
-        self.decoder = Decoder()
+        self.encoder = Encoder().to(CUDA_DEVICE)
+        self.sattn = SocialAttention().to(CUDA_DEVICE)
+        self.pattn = PhysicalAttention().to(CUDA_DEVICE)
+        self.decoder = Decoder().to(CUDA_DEVICE)
 
         input_dim = self.h_dim + 2*self.bottleneck_dim
         mlp_decoder_context_dims = [input_dim, self.mlp_dim, self.h_dim - self.noise_dim]
-        self.mlp_decoder_context = make_mlp(mlp_decoder_context_dims)
+        self.mlp_decoder_context = make_mlp(mlp_decoder_context_dims).to(CUDA_DEVICE)
 
     def add_noise(self, _input):
         npeds = _input.size(0)
@@ -190,20 +191,22 @@ class TrajectoryGenerator(nn.Module):
         return torch.cat((_input, vec), dim=1)
 
     def forward(self, obs_traj, obs_traj_rel, vgg_list):
+        # vgg IN: torch.tensor(batch_size*n_ped_per_seq x batch_size*225 x 512)
+        # obs_traj IN: torch.tensor(8, batch_size*n_ped_per_seq, 64, 2)
+        npeds = obs_traj_rel.size(1) # number of considered pedestrians in current sequence
 
-        npeds = obs_traj_rel.size(1)
         final_encoder_h = self.encoder(obs_traj_rel)
 
-        end_pos = obs_traj[-1, :, :, :]
+        end_pos = obs_traj[-1, :, :, :] # first row in the 64-column is the considered pedestrian, the following are its neighbors until only zeros
         attn_s = self.sattn(final_encoder_h, end_pos)
-        attn_p = self.pattn(vgg_list, end_pos)
+        attn_p = self.pattn(vgg_list, end_pos) # torch.rand(12, 32).cuda(CUDA_DEVICE), 12 important, 32 not?
         mlp_decoder_context_input = torch.cat([final_encoder_h[:, 0, :], attn_s, attn_p], dim=1)
 
         noise_input = self.mlp_decoder_context(mlp_decoder_context_input)
         decoder_h = self.add_noise(noise_input)
         decoder_h = torch.unsqueeze(decoder_h, 0)
 
-        decoder_c = torch.zeros(1, npeds, self.h_dim).cuda()
+        decoder_c = torch.zeros(1, npeds, self.h_dim).cuda(CUDA_DEVICE)
         state_tuple = (decoder_h, decoder_c)
 
         last_pos = obs_traj[-1, :, 0, :]
@@ -220,7 +223,7 @@ class TrajectoryDiscriminator(nn.Module):
 
         self.encoder = Encoder()
         real_classifier_dims = [self.h_dim, self.mlp_dim, 1]
-        self.real_classifier = make_mlp(real_classifier_dims)
+        self.real_classifier = make_mlp(real_classifier_dims).cuda(CUDA_DEVICE)
 
     def forward(self, traj, traj_rel):
 
