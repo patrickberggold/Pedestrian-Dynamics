@@ -14,13 +14,14 @@ from helper import get_color_from_array, SEP
 from hyperparameter_optim import hyperparameter_optimization
 
 CUDA_DEVICE = 0 # 0, 1 or 'cpu'
-MODE = 'grayscale' # implemented: grayscale, rgb, bool, timeAndId
+MODE = 'grayscale_movie' # implemented: grayscale, rgb, bool, timeAndId, grayscale_movie
 BATCH_SIZE = 4
+NUM_HEADS = 4
 
-do_training = False
+do_training = True
 do_hyperparameter_optim = False
 
-datamodule = FloorplanDataModule(mode = MODE, cuda_index = CUDA_DEVICE, batch_size = BATCH_SIZE, non_traj_vals=0.)
+datamodule = FloorplanDataModule(mode = MODE, cuda_index = CUDA_DEVICE, batch_size = BATCH_SIZE, num_ts_per_floorplan=NUM_HEADS)
 
 if do_hyperparameter_optim:
 
@@ -31,12 +32,12 @@ if do_hyperparameter_optim:
 
 if do_training:
 
-    model = Image2ImageModule(mode=MODE, relu_at_end=True)
+    model = Image2ImageModule(mode=MODE, relu_at_end=True, num_heads=NUM_HEADS)
     # print(model)
 
     model_checkpoint = ModelCheckpoint(
         dirpath = SEP.join(['Image2Image','checkpoints', 'checkpoints_DeepLab4Img2Img']),
-        filename = 'model_grayscale_scale_RELUatEnd_BBunfreezeAt8_CONTI_L4_{epoch}-{step}',
+        filename = 'model_grayscale_movie_numHeads4_{epoch}-{step}',
         save_top_k = 1,
         verbose = True, 
         monitor = 'val_loss',
@@ -82,7 +83,7 @@ datamodule.setup(stage='test')
 trainloader = datamodule.train_dataloader()
 testloader = datamodule.test_dataloader()
 
-test_result_folder = 'Image2Image'+SEP+'image_results'
+test_result_folder = 'Image2Image'+SEP+'image_results'+SEP+'image_results'
 if not os.path.isdir(test_result_folder): os.mkdir(test_result_folder)
 
 for idx, batch in enumerate(testloader):
@@ -114,13 +115,15 @@ for idx, batch in enumerate(testloader):
             traj_np = traj[i].detach().cpu().numpy()
             gt_colors_from_timestamps = [get_color_from_array(traj_np[x, y], 89.5)/255. for x, y in np.argwhere(traj_np >= 1.0)]
             img_gt[np.argwhere(traj_np>= 1.0)[:,0], np.argwhere(traj_np >= 1.0)[:,1]] = np.array(gt_colors_from_timestamps)
+            county = idx*BATCH_SIZE + i
+            plt.imsave(f'pred_L4_{county}.jpg', traj_pred_img)
 
             # 3D plot pred
-            # fig = plt.figure(figsize=(6,6))
-            # ax = fig.add_subplot(111, projection='3d')
-            # X,Y = np.meshgrid(np.arange(800), np.arange(800))
-            # ax.plot_surface(X, Y, traj_pred_np)
-            # plt.show()
+            fig = plt.figure(figsize=(6,6))
+            ax = fig.add_subplot(111, projection='3d')
+            X,Y = np.meshgrid(np.arange(800), np.arange(800))
+            ax.plot_surface(X, Y, traj_pred_np)
+            plt.show()
 
             # 3D plot GT
             # fig = plt.figure(figsize=(6,6))
@@ -173,9 +176,9 @@ for idx, batch in enumerate(testloader):
         
         # plt.imshow(img_gt)
         # plt.imshow(traj_pred_img.astype('uint8'), vmin=0, vmax=255)
-        fig, axes = plt.subplots(2, 1)
-        axes[0].imshow(img_gt)
-        axes[0].axis('off')
-        axes[1].imshow(traj_pred_img)
-        axes[1].axis('off')
-        plt.savefig(os.path.join(test_result_folder, f'floorplan_traj_recon_{idx}_{i}.png'))
+        # fig, axes = plt.subplots(2, 1)
+        # axes[0].imshow(img_gt)
+        # axes[0].axis('off')
+        # axes[1].imshow(traj_pred_img)
+        # axes[1].axis('off')
+        # plt.savefig(os.path.join(test_result_folder, f'floorplan_traj_recon_{idx}_{i}.png'))

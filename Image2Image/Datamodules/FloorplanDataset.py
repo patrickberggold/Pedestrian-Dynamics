@@ -1,5 +1,3 @@
-import imp
-import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
 import numpy as np
@@ -106,15 +104,16 @@ class semantic_dataset(Dataset):
         return files_list
 
 class img2img_dataset_traj_1D(Dataset):
-    def __init__(self, mode: str, img_paths: list, traj_paths: list, transform = None, non_traj_vals: float = -5.):
+    def __init__(self, mode: str, img_paths: list, traj_paths: list, transform = None, non_traj_vals: float = 0., num_ts_per_floorplan: int = 1):
 
         self.transform = transform
         self.img_paths = img_paths
         self.traj_paths = traj_paths
         self.mode = mode
         self.non_traj_vals = non_traj_vals
+        self.num_ts_per_floorplan = num_ts_per_floorplan
 
-        assert mode in ['grayscale', 'rgb', 'bool', 'timeAndId'], 'Unknown mode setting!'
+        assert mode in ['grayscale', 'rgb', 'bool', 'timeAndId', 'grayscale_movie'], 'Unknown mode setting!'
         assert len(self.traj_paths) == len(self.img_paths), 'Length of image paths and trajectory paths do not match, something went wrong!'
 
     def __len__(self):
@@ -128,29 +127,40 @@ class img2img_dataset_traj_1D(Dataset):
         img = np.array(h5py.File(img_path, 'r').get('img'))
         # plt.imsave(f'test_input_img_{idx}.jpeg', img, vmin=0, vmax=255)
 
-        traj = np.array(h5py.File(traj_path, 'r').get('img'))
-        
         if self.mode == 'grayscale':
+            traj = np.array(h5py.File(traj_path, 'r').get('img')).astype('float32')
             # SETTING 1
             # Scale timestamp values with respect to maximum timestamp value
             # traj /= 89.5
             # traj[traj == 0.] = -0.02
             # SETTING 2
             traj[traj == 0] = self.non_traj_vals
-            # If passed as numpy, trajectory does not get normalized
+
+        elif self.mode == 'grayscale_movie':
+            traj0 = np.array(h5py.File(traj_path, 'r').get('img')).astype('float32')
+            ts_limits = [(i+1)*traj0.max()/self.num_ts_per_floorplan for i in range(self.num_ts_per_floorplan)]
+            traj = [traj0] + [traj0.copy() for i in range(1,self.num_ts_per_floorplan)]
+            
+            for idx, limit in enumerate(ts_limits):
+                traj[idx][traj[idx] == 0] = self.non_traj_vals
+                traj[idx][traj[idx] > limit] = self.non_traj_vals
+
         elif self.mode == 'rgb':
-            # TODO Maybe change/remove this once transforms switch from Normalization to something else
+            traj = np.array(h5py.File(traj_path, 'r').get('img'))
             if self.transform:
                 traj = self.transform(traj)
+            traj = traj.astype('float32')
         elif self.mode == 'bool':
-            traj = traj.astype('bool').astype('float32')
+            traj = np.array(h5py.File(traj_path, 'r').get('img')).astype('bool').astype('float32')
         elif self.mode == 'timeAndId':
+            traj = np.array(h5py.File(traj_path, 'r').get('img'))
             # SETTING 1
             # Scale timestamp values with respect to maximum timestamp value
             # traj[:,:,0] /= 89.5
             # traj[:,:,0][traj[:,:,0] == 0.] = -0.02
             # SETTING 2
             traj[:,:,0][traj[:,:,0] == 0] = self.non_traj_vals
+            traj = traj.astype('float32')
             # traj = traj[:,:,1]
 
             # Visualize trajectory for checking correctness
@@ -191,4 +201,4 @@ class img2img_dataset_traj_1D(Dataset):
             # TODO transforms for trajs too at some point (e.g. for rotation, resizing):
             # traj = self.transform(traj)
 
-        return img, traj.astype('float32')
+        return img, traj

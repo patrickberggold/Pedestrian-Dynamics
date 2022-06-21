@@ -1,7 +1,8 @@
-from typing import List, Optional
+from typing import List, Optional, Dict
+from collections import OrderedDict
 
 import torch
-from torch import nn
+from torch import nn, Tensor
 from torch.nn import functional as F
 
 from torchvision.models import mobilenetv3
@@ -9,6 +10,7 @@ from torchvision.models import resnet
 from torchvision.models._utils import IntermediateLayerGetter
 from torchvision.models.segmentation._utils import  _SimpleSegmentationModel, _load_weights
 from torchvision.models.segmentation.fcn import FCNHead
+from torchvision.utils import _log_api_usage_once
 
 __all__ = [
     "DeepLabV3",
@@ -43,6 +45,38 @@ class DeepLabV3(_SimpleSegmentationModel):
 
     pass
 
+
+class DeepLabV3MulitHead(nn.Module):
+    __constants__ = ["aux_classifier"]
+
+    def __init__(self, backbone: nn.Module, classifiers: nn.ModuleList, aux_classifier: Optional[nn.Module] = None) -> None:
+        super().__init__()
+        _log_api_usage_once(self)
+        self.backbone = backbone
+        self.classifiers = classifiers
+        self.aux_classifier = aux_classifier
+
+    def forward(self, x: Tensor) -> Dict[str, Tensor]:
+        input_shape = x.shape[-2:]
+        # contract: features is a dict of tensors
+        features = self.backbone(x)
+
+        result = OrderedDict()
+        x = features["out"]
+        result["out"] = []
+        
+        for idx, classifier in enumerate(self.classifiers):
+            x_class = classifier(x)
+            x_class = F.interpolate(x_class, size=input_shape, mode="bilinear", align_corners=False)
+            result["out"].append(x_class)
+
+        # if self.aux_classifier is not None:
+        #     x = features["aux"]
+        #     x = self.aux_classifier(x)
+        #     x = F.interpolate(x, size=input_shape, mode="bilinear", align_corners=False)
+        #     result["aux"] = x
+
+        return result
 
 class DeepLabHead(nn.Sequential):
     def __init__(self, in_channels: int, num_classes: int, relu_at_end: bool = False) -> None:
@@ -126,7 +160,8 @@ def _deeplabv3_resnet(
     backbone: resnet.ResNet,
     num_classes: int,
     aux: Optional[bool],
-    relu_at_end: bool = False
+    relu_at_end: bool = False,
+    num_heads: int = 1
 ) -> DeepLabV3:
     return_layers = {"layer4": "out"}
     if aux:
@@ -134,8 +169,12 @@ def _deeplabv3_resnet(
     backbone = IntermediateLayerGetter(backbone, return_layers=return_layers)
 
     aux_classifier = FCNHead(1024, num_classes) if aux else None
-    classifier = DeepLabHead(2048, num_classes, relu_at_end=relu_at_end)
-    return DeepLabV3(backbone, classifier, aux_classifier)
+    if num_heads == 1:
+        classifier = DeepLabHead(2048, num_classes, relu_at_end=relu_at_end)
+        return DeepLabV3(backbone, classifier, aux_classifier)
+    else:
+        classifiers = nn.ModuleList([DeepLabHead(2048, num_classes, relu_at_end=relu_at_end) for i in range(num_heads)])
+        return DeepLabV3MulitHead(backbone, classifiers, aux_classifier)
 
 
 def _deeplabv3_mobilenetv3(
@@ -167,7 +206,8 @@ def deeplabv3_resnet50(
     output_channels: int = 21,
     aux_loss: Optional[bool] = None,
     pretrained_backbone: bool = True,
-    relu_at_end: bool = False
+    relu_at_end: bool = False,
+    num_heads: int = 1,
 ) -> DeepLabV3:
     """Constructs a DeepLabV3 model with a ResNet-50 backbone.
 
@@ -184,7 +224,7 @@ def deeplabv3_resnet50(
         pretrained_backbone = False
 
     backbone = resnet.resnet50(pretrained=pretrained_backbone, replace_stride_with_dilation=[False, True, True])
-    model = _deeplabv3_resnet(backbone, output_channels, aux_loss, relu_at_end=relu_at_end)
+    model = _deeplabv3_resnet(backbone, output_channels, aux_loss, relu_at_end=relu_at_end, num_heads=num_heads)
 
     if pretrained:
         arch = "deeplabv3_resnet50_coco"

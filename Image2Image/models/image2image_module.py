@@ -18,11 +18,12 @@ class Image2ImageModule(pl.LightningModule):
         two_loss_fcts_param: float = 10., 
         unfreeze_backbone_at_epoch: int = 8,
         relu_at_end: bool = False,
-        loss_fct: str = 'mse'
+        loss_fct: str = 'mse',
+        num_heads: int = 1
         ):
         super(Image2ImageModule, self).__init__()
         
-        assert mode in ['grayscale', 'rgb', 'bool', 'segmentation', 'timeAndId'], 'Unknown mode setting!'
+        assert mode in ['grayscale', 'rgb', 'bool', 'segmentation', 'timeAndId', 'grayscale_movie'], 'Unknown mode setting!'
         
         self.mode = mode
         self.learning_rate = learning_rate
@@ -31,6 +32,7 @@ class Image2ImageModule(pl.LightningModule):
         self.lr_sch_gamma = lr_sch_gamma
         self.unfreeze_backbone_at_epoch = unfreeze_backbone_at_epoch
         self.relu_at_end = relu_at_end
+        self.num_heads = 1
         assert self.lr_scheduler in [CosineAnnealingLR.__name__, StepLR.__name__, ExponentialLR.__name__, ReduceLROnPlateau.__name__], 'Unknown LR Scheduler!'
         assert loss_fct in ['mse', 'l1_loss', 'crafted'], 'Unknown loss function'
         if loss_fct == 'mse':
@@ -58,6 +60,10 @@ class Image2ImageModule(pl.LightningModule):
             num_agents = 40
             self.output_channels = 1 + 1 + num_agents # grayscale dim + background class + number of agents
             self.two_loss_fcts_param = two_loss_fcts_param
+        elif self.mode == 'grayscale_movie':
+            self.output_channels = 1
+            assert num_heads > 1 and isinstance(num_heads, int)
+            self.num_heads = num_heads
         else:
             raise ValueError
 
@@ -65,7 +71,7 @@ class Image2ImageModule(pl.LightningModule):
         # self.net = ENet(num_classes = self.num_classes)
         # self.net = torchvision.models.segmentation.fcn_resnet50(pretrained = False, progress = True, num_classes = self.num_classes)
 
-        self.net = deeplabv3_resnet50(pretrained = False, progress = True, output_channels = self.output_channels, relu_at_end = self.relu_at_end)
+        self.net = deeplabv3_resnet50(pretrained = False, progress = True, output_channels = self.output_channels, relu_at_end = self.relu_at_end, num_heads=self.num_heads)
 
         # Check intermediate layers and sizes
         # summary(self.net.to('cuda:0'), (3, 800, 800), device='cuda') # IMPORTANT: INCLUDE non-Instance of torch.Tensor exclusion, otherwise exception
@@ -110,6 +116,8 @@ class Image2ImageModule(pl.LightningModule):
             train_loss = lambda_CE2MSE * loss_CE + loss_regression
         elif self.mode == 'grayscale' or self.mode == 'rgb':
             train_loss = self.loss_fct(traj_pred.squeeze(), traj.float())
+        elif self.mode == 'grayscale_movie':
+            train_loss = sum([self.loss_fct(traj_pred_ts.squeeze(), traj[idx].float()) for idx, traj_pred_ts in enumerate(traj_pred)])
         else:
             raise NotImplementedError('Mode not implemented!')
         
@@ -138,6 +146,8 @@ class Image2ImageModule(pl.LightningModule):
             val_loss = lambda_CE2MSE * loss_CE + loss_regression
         elif self.mode == 'grayscale' or self.mode == 'rgb':
             val_loss = self.loss_fct(traj_pred.squeeze(), traj.float())
+        elif self.mode == 'grayscale_movie':
+            val_loss = sum([self.loss_fct(traj_pred_ts.squeeze(), traj[idx].float()) for idx, traj_pred_ts in enumerate(traj_pred)])
         else:
             raise NotImplementedError('Mode not implemented!')
         
