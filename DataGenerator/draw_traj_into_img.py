@@ -123,6 +123,13 @@ if not os.path.isdir(HDF5_TRAJ_MASK_PATH): os.mkdir(HDF5_TRAJ_MASK_PATH)
 HDF5_TIME_AND_ID_MASK_PATH = 'C:\\Users\\ga78jem\\Documents\\Revit\\HDF5_GT_TIME_AND_ID_MASKS_resolution_800_800'
 if not os.path.isdir(HDF5_TIME_AND_ID_MASK_PATH): os.mkdir(HDF5_TIME_AND_ID_MASK_PATH)
 
+HDF5_TIME_AND_COUNTS_MASK_PATH = 'C:\\Users\\ga78jem\\Documents\\Revit\\HDF5_GT_TIME_AND_COUNTS_MASKS_resolution_800_800'
+if not os.path.isdir(HDF5_TIME_AND_COUNTS_MASK_PATH): os.mkdir(HDF5_TIME_AND_COUNTS_MASK_PATH)
+
+# TWO POSSIBILITIES FOR "MOVIES":
+# one input image --> four output images (each correspoding to respective slice)
+# one input image + one number {1,2,3,4} --> one image (corresponding to respective slice)
+
 for floorplan_folder in os.listdir(HDF5_ROOT_FOLDER):
     h5_img_traj_floorplan_folder = os.path.join(HDF5_COLOR_TRAJ_PATH, floorplan_folder)
     if not os.path.isdir(h5_img_traj_floorplan_folder): os.mkdir(h5_img_traj_floorplan_folder)
@@ -132,6 +139,9 @@ for floorplan_folder in os.listdir(HDF5_ROOT_FOLDER):
 
     h5_img_ts_and_id_mask_floorplan_folder = os.path.join(HDF5_TIME_AND_ID_MASK_PATH, floorplan_folder)
     if not os.path.isdir(h5_img_ts_and_id_mask_floorplan_folder): os.mkdir(h5_img_ts_and_id_mask_floorplan_folder)
+
+    h5_img_ts_and_counts_mask_floorplan_folder = os.path.join(HDF5_TIME_AND_COUNTS_MASK_PATH, floorplan_folder)
+    if not os.path.isdir(h5_img_ts_and_counts_mask_floorplan_folder): os.mkdir(h5_img_ts_and_counts_mask_floorplan_folder)
 
     print(f'Drawing trajectories (RGB and float masks) into {floorplan_folder}...')
 
@@ -145,6 +155,7 @@ for floorplan_folder in os.listdir(HDF5_ROOT_FOLDER):
         resolution_height, resolution_width  = resolutions[0], resolutions[1]
 
         trajectory_mask = np.zeros((resolution_width, resolution_height))
+        trajectory_t_and_count_mask = np.zeros((resolution_width, resolution_height, 2))
         trajectory_t_an_id_mask = np.zeros((resolution_width, resolution_height, 2))
         trajectory2timestamp = {}
         trajectory2timestamp_and_id = {}
@@ -213,14 +224,22 @@ for floorplan_folder in os.listdir(HDF5_ROOT_FOLDER):
                 for (coord, timestamp) in zip(coord_line, timestamp_line):
                     if coord not in trajectory2timestamp_and_id:
                         # update only timestamp
-                        trajectory2timestamp.update({coord: timestamp})
+                        trajectory2timestamp.update({coord: (timestamp, 1.)})
                         # update timestamp and pedestrian id
                         trajectory2timestamp_and_id.update({coord: [timestamp, pedId]})
                     else:
-                        current_ts = trajectory2timestamp_and_id[coord][0]
+                        current_ts_avg = trajectory2timestamp[coord][0]
+                        current_ts_counter = trajectory2timestamp[coord][1]
+                        trajectory2timestamp[coord] = (
+                            current_ts_avg + timestamp/(current_ts_counter + 1.) - current_ts_avg/(current_ts_counter + 1.),
+                            current_ts_counter + 1
+                        )
+                        # new_ts_avg = trajectory2timestamp[coord][0]
+                        # new_ts_counter = trajectory2timestamp[coord][1]
+
                         if timestamp > trajectory2timestamp_and_id[coord][0]:
                             # update only timestamp
-                            trajectory2timestamp.update({coord: timestamp})
+                            # trajectory2timestamp.update({coord: timestamp})
                             # update timestamp and pedestrian id
                             trajectory2timestamp_and_id.update({coord: [timestamp, pedId]})
                         elif timestamp == trajectory2timestamp_and_id[coord][0]:
@@ -230,12 +249,13 @@ for floorplan_folder in os.listdir(HDF5_ROOT_FOLDER):
                             continue
 
         # consistency check
-        for key in trajectory2timestamp_and_id:
-            assert trajectory2timestamp_and_id[key][0] == trajectory2timestamp[key]
+        # for key in trajectory2timestamp_and_id:
+        #     assert trajectory2timestamp_and_id[key][0] == trajectory2timestamp[key]
 
         trajectory_coord_list = np.array(list(trajectory2timestamp.keys()))
         # Assign times to coordinates inside mask
-        trajectory_mask[trajectory_coord_list[:,1], trajectory_coord_list[:,0]] = np.array(list(trajectory2timestamp.values()))
+        trajectory_mask[trajectory_coord_list[:,1], trajectory_coord_list[:,0]] = np.array(list(trajectory2timestamp.values()))[:,0]
+        trajectory_t_and_count_mask[trajectory_coord_list[:,1], trajectory_coord_list[:,0]] = np.array(list(trajectory2timestamp.values()))
 
         # Assign times and ids to coordinates inside mask
         trajectory_t_an_id_mask[trajectory_coord_list[:,1], trajectory_coord_list[:,0]] = np.array(list(trajectory2timestamp_and_id.values()))
@@ -243,10 +263,10 @@ for floorplan_folder in os.listdir(HDF5_ROOT_FOLDER):
         # traj = trajectory_t_an_id_mask[:,:,1].squeeze()
         # non_zeros = np.argwhere(traj > 0)
         # for coord in non_zeros:
-        #     id = traj[coord[0], coord[1]]
-        #     color = get_color_from_pedId(id)
-        #     # ts = traj[coord[0], coord[1]]
-        #     #color = get_color_from_array(ts, MAX_TIME)
+        #     # id = traj[coord[0], coord[1]]
+        #     # color = get_color_from_pedId(id)
+        #     ts = traj[coord[0], coord[1]]
+        #     color = get_color_from_array(ts, MAX_TIME)
         #     img[coord[0], coord[1]] = color
         # plt.imshow(img, vmin=0, vmax=255)
 
@@ -274,15 +294,21 @@ for floorplan_folder in os.listdir(HDF5_ROOT_FOLDER):
         # hf_im.close()
 
         # Store trajectory masks images as HDF5
-        # h5_img_ts_mask_filepath = os.path.join(h5_img_ts_mask_floorplan_folder, variation_image)
-        # hf_mk = h5py.File(h5_img_ts_mask_filepath, 'w')
-        # hf_mk.create_dataset('img', data=trajectory_mask)
-        # hf_mk.close()
+        h5_img_ts_mask_filepath = os.path.join(h5_img_ts_mask_floorplan_folder, variation_image)
+        hf_mk = h5py.File(h5_img_ts_mask_filepath, 'w')
+        hf_mk.create_dataset('img', data=trajectory_mask)
+        hf_mk.close()
 
         # Store timestamp and id masks images as HDF5
-        h5_img_ts_and_id_mask_filepath = os.path.join(h5_img_ts_and_id_mask_floorplan_folder, variation_image)
-        hf_mk = h5py.File(h5_img_ts_and_id_mask_filepath, 'w')
-        hf_mk.create_dataset('img', data=trajectory_t_an_id_mask)
+        # h5_img_ts_and_id_mask_filepath = os.path.join(h5_img_ts_and_id_mask_floorplan_folder, variation_image)
+        # hf_mk = h5py.File(h5_img_ts_and_id_mask_filepath, 'w')
+        # hf_mk.create_dataset('img', data=trajectory_t_an_id_mask)
+        # hf_mk.close()
+
+        # Store timestamp and count masks images as HDF5
+        h5_img_ts_and_count_mask_filepath = os.path.join(h5_img_ts_and_counts_mask_floorplan_folder, variation_image)
+        hf_mk = h5py.File(h5_img_ts_and_count_mask_filepath, 'w')
+        hf_mk.create_dataset('img', data=trajectory_t_and_count_mask)
         hf_mk.close()
 
         # Visualize stored hdf5 file
@@ -297,58 +323,3 @@ for floorplan_folder in os.listdir(HDF5_ROOT_FOLDER):
 
     # plt.plot(frs, gvals)
     # plt.show()
-
-quit()
-
-cmap = plt.cm.get_cmap('jet')
-start, end = 65, 200
-range = np.arange(start, end) # np.arange(cmap.N)
-colors = cmap(range)
-plt.imshow(img, cmap=cmap, vmin=0, vmax=255)
-plt.colorbar()
-plt.show()
-
-# fig, ax = plt.subplots()
-# from mpl_toolkits.axes_grid1 import make_axes_locatable
-# divider = make_axes_locatable(ax)
-# cax = divider.append_axes('right', size='5%', pad=0.05)
-
-# im = ax.imshow(img, vmin=0, vmax=255)
-
-# fig.colorbar(im, cax=cax, orientation='vertical')
-# plt.show()
-
-lines = lines
-# ftype jarfile="C:\Users\ga78jem\Java\jdk1.8.0_131\jdk1.8.0_131\bin\javaw.exe" -jar -jar "%1" %*
-
-# from matplotlib.colors import LinearSegmentedColormap
-# def grayscale_cmap(cmap):
-#     """Return a grayscale version of the given colormap"""
-#     cmap = plt.cm.get_cmap(cmap)
-#     colors = cmap(np.arange(cmap.N))
-    
-#     # convert RGBA to perceived grayscale luminance
-#     # cf. http://alienryderflex.com/hsp.html
-#     RGB_weight = [0.299, 0.587, 0.114]
-#     luminance = np.sqrt(np.dot(colors[:, :3] ** 2, RGB_weight))
-#     colors[:, :3] = luminance[:, np.newaxis]
-        
-#     return LinearSegmentedColormap.from_list(cmap.name + "_gray", colors, cmap.N)
-    
-# def view_colormap(cmap):
-#     """Plot a colormap with its grayscale equivalent"""
-#     cmap = plt.cm.get_cmap(cmap)
-#     colors = cmap(np.arange(65,200))
-    
-#     cmap = grayscale_cmap(cmap)
-#     grayscale = cmap(np.arange(65,200))
-    
-#     fig, ax = plt.subplots(2, figsize=(6, 2),
-#                            subplot_kw=dict(xticks=[], yticks=[]))
-#     ax[0].imshow([colors], extent=[0, 10, 0, 1])
-#     ax[1].imshow([grayscale], extent=[0, 10, 0, 1])
-# # view_colormap('jet')
-
-# TWO POSSIBILITIES:
-# one input image --> four output images (each correspoding to respective slice)
-# one input image + one number {1,2,3,4} --> one image (corresponding to respective slice)

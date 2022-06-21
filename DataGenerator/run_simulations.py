@@ -1,10 +1,10 @@
 import os
 import re
-from subprocess import check_output
-import subprocess
 
 JAVA_EXE = 'C:\\Users\\ga78jem\\AppData\\Roaming\\accu-rate\\crowd-it\\bin\\java\\zulu11.50.19-ca-fx-jdk11.0.12-win_x64\\bin\\java.exe'
 CROWDIT_KERNEL = '-jar C:\\Users\\ga78jem\\AppData\\Roaming\\accu-rate\\crowd-it\\bin\\kernel\\2.11.1.jar'
+NUM_AGENTS = 10
+AGENTS_SPAWNING_PER_SECOND = 2
 
 def manipulate_settings(crowdit_folder: str, num_agents: int = 40, spawn_endtime: int = 5):
     crowdit_folder_list = sorted([dirname for dirname in os.listdir(crowdit_folder) if '__floorplan' in dirname], key=lambda x: int(x.split('__')[0]))
@@ -44,7 +44,7 @@ def run_simulations(crowdit_folder: str):
                 print(f'\n\nSimulating {project_file}...')
                 os.system(command+' '+setting)
 
-manipulate_settings('C:\\Users\\ga78jem\\Documents\\Crowdit', num_agents=40, spawn_endtime=5)
+manipulate_settings('C:\\Users\\ga78jem\\Documents\\Crowdit', num_agents=NUM_AGENTS, spawn_endtime=int(NUM_AGENTS/AGENTS_SPAWNING_PER_SECOND))
 run_simulations('C:\\Users\\ga78jem\\Documents\\Crowdit')
 
 # def run_win_cmd(cmd):
