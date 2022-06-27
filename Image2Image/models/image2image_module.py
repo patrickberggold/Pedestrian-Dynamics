@@ -13,7 +13,7 @@ class Image2ImageModule(pl.LightningModule):
         mode: str, 
         learning_rate: float = 1e-3, 
         lr_scheduler: str = StepLR.__name__, 
-        lr_sch_step_size: int = 10, 
+        lr_sch_step_size: int = 8, 
         lr_sch_gamma: float = 0.3, 
         two_loss_fcts_param: float = 10., 
         unfreeze_backbone_at_epoch: int = 8,
@@ -88,7 +88,7 @@ class Image2ImageModule(pl.LightningModule):
         # summary(first_part, (3, 800, 800), device='cuda')
     
     def crafted_loss(self, prediction, target):
-        return torch.mean((prediction - target)**4)
+        return torch.mean(torch.abs((prediction - target)**3))
     
     def forward(self, x):
         return self.net(x)

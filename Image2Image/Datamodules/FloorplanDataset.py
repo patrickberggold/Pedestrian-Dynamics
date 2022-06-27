@@ -104,7 +104,7 @@ class semantic_dataset(Dataset):
         return files_list
 
 class img2img_dataset_traj_1D(Dataset):
-    def __init__(self, mode: str, img_paths: list, traj_paths: list, transform = None, non_traj_vals: float = 0., num_ts_per_floorplan: int = 1):
+    def __init__(self, mode: str, img_paths: list, traj_paths: list, transform = None, non_traj_vals: float = 0., vary_area_brightness: bool = False, num_ts_per_floorplan: int = 1):
 
         self.transform = transform
         self.img_paths = img_paths
@@ -112,6 +112,7 @@ class img2img_dataset_traj_1D(Dataset):
         self.mode = mode
         self.non_traj_vals = non_traj_vals
         self.num_ts_per_floorplan = num_ts_per_floorplan
+        self.vary_area_brightness = vary_area_brightness
 
         assert mode in ['grayscale', 'rgb', 'bool', 'timeAndId', 'grayscale_movie'], 'Unknown mode setting!'
         assert len(self.traj_paths) == len(self.img_paths), 'Length of image paths and trajectory paths do not match, something went wrong!'
@@ -127,6 +128,28 @@ class img2img_dataset_traj_1D(Dataset):
         img = np.array(h5py.File(img_path, 'r').get('img'))
         # plt.imsave(f'test_input_img_{idx}.jpeg', img, vmin=0, vmax=255)
 
+        # Change origin and destination area brightnesses
+        if self.vary_area_brightness:
+            agent_variations = [10, 20, 30, 40, 50]
+            # bright_limit = 100
+            # dark_limit = 155
+            # color_interval_length = (dark_limit+bright_limit)//len(agent_variations)
+            agent_variations_index = agent_variations.index(int(traj_path.split(SEP)[-3].split('_')[-1]))
+            # reset origin color
+            or_color_range = [[255, 100, 100], [255, 50, 50], [255, 0, 0], [205, 0, 0], [155, 0, 0]]
+            or_area_color = np.array(or_color_range[agent_variations_index])
+            or_coords = np.where(np.all(img == np.array([255, 0, 0]), axis=-1))
+            img[or_coords[0], or_coords[1]] = or_area_color
+            # reset destination color
+            dst_color_range = [[100, 255, 100], [50, 255, 50], [0, 255, 0], [0, 205, 0], [0, 155, 0]]
+            dst_area_color = np.array(dst_color_range[agent_variations_index])
+            dst_coords = np.where(np.all(img == np.array([0, 255, 0]), axis=-1))
+            img[dst_coords[0], dst_coords[1]] = dst_area_color
+
+            assert len(or_coords[0]) > 0 and len(or_coords[0])==len(or_coords[1])
+            assert len(dst_coords[0]) > 0 and len(dst_coords[0])==len(dst_coords[1])
+            # plt.imshow(img.astype('uint8'), vmin=0, vmax=255)
+
         if self.mode == 'grayscale':
             traj = np.array(h5py.File(traj_path, 'r').get('img')).astype('float32')
             # SETTING 1
@@ -138,12 +161,18 @@ class img2img_dataset_traj_1D(Dataset):
 
         elif self.mode == 'grayscale_movie':
             traj0 = np.array(h5py.File(traj_path, 'r').get('img')).astype('float32')
-            ts_limits = [(i+1)*traj0.max()/self.num_ts_per_floorplan for i in range(self.num_ts_per_floorplan)]
+            # ts_limits = [(i+1)*traj0.max()/self.num_ts_per_floorplan for i in range(self.num_ts_per_floorplan)]
+            ts_limits = [i * traj0.max()/self.num_ts_per_floorplan for i in range(self.num_ts_per_floorplan+1)]
             traj = [traj0] + [traj0.copy() for i in range(1,self.num_ts_per_floorplan)]
             
-            for idx, limit in enumerate(ts_limits):
+            # for idx, limit in enumerate(ts_limits):
+            #     traj[idx][traj[idx] == 0] = self.non_traj_vals
+            #     traj[idx][traj[idx] > limit] = self.non_traj_vals
+            for idx in range(len(ts_limits)-1):
                 traj[idx][traj[idx] == 0] = self.non_traj_vals
-                traj[idx][traj[idx] > limit] = self.non_traj_vals
+                # traj[idx][traj[idx] > limit] = self.non_traj_vals
+                traj[idx][traj[idx] > ts_limits[idx+1]] = self.non_traj_vals
+                traj[idx][traj[idx] <= ts_limits[idx]] = self.non_traj_vals
 
         elif self.mode == 'rgb':
             traj = np.array(h5py.File(traj_path, 'r').get('img'))
@@ -163,14 +192,6 @@ class img2img_dataset_traj_1D(Dataset):
             traj = traj.astype('float32')
             # traj = traj[:,:,1]
 
-            # Visualize trajectory for checking correctness
-            # non_zeros = np.argwhere(traj[:,:,1] != 0.)
-            # # img[non_zeros[:,0], non_zeros[:,1]] = np.array([0, 0, 255])
-            # for coord in non_zeros:
-            #     id = traj[:,:,1][coord[0], coord[1]]
-            #     img[coord[0], coord[1]] = get_color_from_pedId(id)
-            # plt.imshow(img, vmin=0, vmax=255)
-
             # # Generate random arrayas for testing forward pass
             # traj = np.random.randint(0, high=41, size=(800,800))
             # # Append random int-array for testing
@@ -189,8 +210,14 @@ class img2img_dataset_traj_1D(Dataset):
             # non_zeros = np.argwhere(traj != 0)
             # img[non_zeros[:,0], non_zeros[:,1]] = np.array([0, 0, 255])
             # plt.imsave(f'test_input_and_GT_{idx}.jpeg', img, vmin=0, vmax=255)
-            
         
+        # Visualize trajectory for checking correctness
+        # for t in traj:
+        #     non_zeros = np.argwhere(t != 0.)
+        #     img_now = img.copy()
+        #     img_now[non_zeros[:,0], non_zeros[:,1]] = np.array([0, 0, 255])
+        #     plt.imshow(img_now, vmin=0, vmax=255)
+            
         # plot images to test correctness
         # plt.imsave(f'test_img_{idx}.jpeg', img, vmin=0, vmax=255)
         # if isinstance(mask, np.ndarray): 

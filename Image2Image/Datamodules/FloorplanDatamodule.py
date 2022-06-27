@@ -15,7 +15,8 @@ class FloorplanDataModule(pl.LightningDataModule):
         splits: list = [0.7, 0.15, 0.15], 
         non_traj_vals: float = 0., 
         num_workers: int = 0, 
-        num_ts_per_floorplan: int = 1
+        num_ts_per_floorplan: int = 1,
+        vary_area_brightness: bool = False
         ):
         super().__init__()
         assert mode in ['grayscale', 'rgb', 'bool', 'segmentation', 'timeAndId', 'grayscale_movie'], 'Unknown mode setting!'
@@ -29,6 +30,7 @@ class FloorplanDataModule(pl.LightningDataModule):
         self.cuda_index = cuda_index
         self.num_workers = num_workers
         self.non_traj_vals = non_traj_vals
+        self.vary_area_brightness = vary_area_brightness
         if self.mode == 'grayscale_movie':
             assert num_ts_per_floorplan > 1 and isinstance(num_ts_per_floorplan, int)
             self.num_ts_per_floorplan = num_ts_per_floorplan
@@ -42,9 +44,9 @@ class FloorplanDataModule(pl.LightningDataModule):
             self.val_dataset = semantic_dataset(split='val', transform=self.transforms)
             self.test_dataset = semantic_dataset(split='test', transform=self.transforms)
         else:
-            self.train_dataset = img2img_dataset_traj_1D(self.mode, self.train_imgs_list, self.train_trajs_list, transform=self.transforms, non_traj_vals=self.non_traj_vals, num_ts_per_floorplan=self.num_ts_per_floorplan)
-            self.val_dataset = img2img_dataset_traj_1D(self.mode, self.val_imgs_list, self.val_trajs_list, transform=self.transforms, non_traj_vals=self.non_traj_vals, num_ts_per_floorplan=self.num_ts_per_floorplan)
-            self.test_dataset = img2img_dataset_traj_1D(self.mode, self.test_imgs_list, self.test_trajs_list, transform=self.transforms, non_traj_vals=self.non_traj_vals, num_ts_per_floorplan=self.num_ts_per_floorplan)
+            self.train_dataset = img2img_dataset_traj_1D(self.mode, self.train_imgs_list, self.train_trajs_list, transform=self.transforms, non_traj_vals=self.non_traj_vals, num_ts_per_floorplan=self.num_ts_per_floorplan, vary_area_brightness=self.vary_area_brightness)
+            self.val_dataset = img2img_dataset_traj_1D(self.mode, self.val_imgs_list, self.val_trajs_list, transform=self.transforms, non_traj_vals=self.non_traj_vals, num_ts_per_floorplan=self.num_ts_per_floorplan, vary_area_brightness=self.vary_area_brightness)
+            self.test_dataset = img2img_dataset_traj_1D(self.mode, self.test_imgs_list, self.test_trajs_list, transform=self.transforms, non_traj_vals=self.non_traj_vals, num_ts_per_floorplan=self.num_ts_per_floorplan, vary_area_brightness=self.vary_area_brightness)
 
     def train_dataloader(self):
         return DataLoader(self.train_dataset, batch_size=self.batch_size, num_workers=self.num_workers)
@@ -78,7 +80,10 @@ class FloorplanDataModule(pl.LightningDataModule):
 
         self.img_path = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'HDF5_INPUT_IMAGES_resolution_800_800']) # '/home/Datasets/Segmentation/Floorplans/HDF5_INPUT_IMAGES_resolution_800_800'
         if self.mode in ['grayscale', 'grayscale_movie', 'bool']:
-            self.traj_path = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'HDF5_GT_TIMESTAMP_MASKS_resolution_800_800'])
+            if self.vary_area_brightness:
+                self.traj_path = [SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', f'HDF5_GT_TIMESTAMP_MASKS_resolution_800_800_numAgents_{var}']) for var in [10, 20, 30, 40, 50]]
+            else:
+                self.traj_path = [SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'HDF5_GT_TIMESTAMP_MASKS_resolution_800_800'])]
         elif self.mode == 'rgb':
             self.traj_path = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'HDF5_GT_COLORED_TRAJ_resolution_800_800'])
         elif self.mode == 'timeAndId':
@@ -87,10 +92,15 @@ class FloorplanDataModule(pl.LightningDataModule):
             self.traj_path = None
 
         assert os.path.isdir(self.img_path)
-        assert os.path.isdir(self.traj_path)
-        
-        self.img_list = self.get_filenames(self.img_path)
-        self.traj_list = self.get_filenames(self.traj_path)
+        self.img_list = []
+        self.traj_list = []
+        for path in self.traj_path:
+            assert os.path.isdir(path)
+            self.traj_list += self.get_filenames(path)
+            self.img_list += self.get_filenames(self.img_path)
+
+        # self.img_list = self.get_filenames(self.img_path)
+        # self.traj_list = self.get_filenames(self.traj_path)
 
         assert len(self.img_list) == len(self.traj_list), 'Images list and trajectory list do not have same length, something went wrong!'
         # Randomly check if entries are the same

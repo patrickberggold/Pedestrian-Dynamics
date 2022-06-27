@@ -38,6 +38,12 @@ def get_customized_colormap():
    
 def get_color_from_array(index, max_index, return_in_cv2: bool = False):
 
+    # MAX INDEX FOR NUM_AGENTS:
+    # num_agents = 20: max_timestep = 55.0 
+    # num_agents = 30: max_timestep = 66.0 
+    # num_agents = 40: max_timestep = 89.5 
+    # num_agents = 50: max_timestep = 104.5 
+
     # colors from https://doc.instantreality.org/tools/color_calculator/
     # [143, 255, 211] -> [143, 255, 255] -> [0, 187, 255] -> [0, 0, 255] -> [255, 0, 255]
     b_val0 = 211

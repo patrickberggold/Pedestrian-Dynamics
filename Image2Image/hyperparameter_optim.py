@@ -9,11 +9,11 @@ from helper import SEP
 import json
  
 ROOT_PATH = SEP.join(['Image2Image', 'Optimization'])
-OPTIMIZATION_NAME = 'ReLU_activation_at_end__l1_loss'
+OPTIMIZATION_NAME = 'grayscale_movie_numHeads8_flow_variedAreaBrightnesses'
 FOLDER_NAME = os.path.join(ROOT_PATH, OPTIMIZATION_NAME)
 if not os.path.isdir(FOLDER_NAME): os.mkdir(FOLDER_NAME)
 
-MODEL_FILENAME = 'model_optuna_optim___non_traj_vals__unfreeze.ckpt'
+MODEL_FILENAME = 'model_optuna_movie_numHeads8_flow_variedAreaBrightnesses.ckpt'
 LOG_FILENAME = os.path.join(FOLDER_NAME, 'log.txt')
 
 def hyperparameter_optimization(
@@ -26,7 +26,7 @@ def hyperparameter_optimization(
     limit_val_batches = None
     ):
 
-    assert mode in ['grayscale', 'rgb', 'bool', 'segmentation', 'timeAndId'], 'Unknown mode setting!'
+    assert mode in ['grayscale', 'rgb', 'bool', 'segmentation', 'timeAndId', 'grayscale_movie'], 'Unknown mode setting!'
 
     log_file = open(LOG_FILENAME, "w")
     log_file.close()
@@ -41,7 +41,7 @@ def hyperparameter_optimization(
         # non_traj_vals = trial.suggest_float("ntv", -7., -0.5)
         # unfreeze_backbone_epoch = trial.suggest_categorical
 
-        module = Image2ImageModule(mode=mode, learning_rate=learning_rate, lr_sch_step_size=5, lr_sch_gamma=lr_sch_gamma, unfreeze_backbone_at_epoch=8, relu_at_end = True, loss_fct='l1_loss')
+        module = Image2ImageModule(mode=mode, learning_rate=learning_rate, lr_sch_gamma=lr_sch_gamma, relu_at_end = True, num_heads=8)
 
         datamodule.set_non_traj_vals(new_val = 0.)
 
