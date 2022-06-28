@@ -19,7 +19,7 @@ D_STEPS = 2
 
 MAX_PEDS = 64 # maximal pedestrians considered (per sequence) --> influence acc. to distance between peds
 BEST_K = 20
-PRINT_EVERY = 250
+PRINT_EVERY = 50
 NUM_SAMPLES = 20
 NUM_SAMPLES_CHECK = 5000
 

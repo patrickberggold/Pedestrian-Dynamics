@@ -5,11 +5,10 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR, ExponentialLR, R
 from torch.optim import Adam
 import pytorch_lightning as pl
 from torchsummary import summary
-from model import deeplabv3_resnet50
-from deeplabv3_resnet50_custom import deeplabv3_resnet50
+from .model import deeplabv3_resnet50, DeepLabHead, Interpolate
+from .deeplabv3_resnet50_custom import deeplabv3_resnet50
 # from torchvision.models.segmentation import fcn_resnet50
 from torchvision.models.vgg import vgg19_bn, vgg19
-from model import DeepLabHead, Interpolate
 
 class Image2ImageModule(pl.LightningModule):
     def __init__(
@@ -54,16 +53,16 @@ class Image2ImageModule(pl.LightningModule):
         # self.net = ENet(num_classes = self.num_classes)
         # self.net = torchvision.models.segmentation.fcn_resnet50(pretrained = False, progress = True, num_classes = self.num_classes)
 
-        self.net = deeplabv3_resnet50(pretrained = False, progress = True, output_channels = self.output_channels, relu_at_end = self.relu_at_end)
+        # self.net = deeplabv3_resnet50(pretrained = False, progress = True, output_channels = self.output_channels, relu_at_end = self.relu_at_end)
         # self.backbone = vgg19_bn(pretrained=True, progress=True).features
         # self.avg_pool = nn.AdaptiveAvgPool2d((15, 15))
         # self.reconstruction = DeepLabHead(in_channels=512, num_classes=self.output_channels)
-        # self.net = nn.Sequential(
-        #     vgg19_bn(pretrained=True, progress=True).features,
-        #     nn.AdaptiveAvgPool2d((15, 15)),
-        #     Interpolate((100,100), 'bilinear'),
-        #     DeepLabHead(in_channels=512, num_classes=self.output_channels)
-        # )
+        self.net = nn.Sequential(
+            vgg19_bn(pretrained=True, progress=True).features,
+            nn.AdaptiveAvgPool2d((15, 15)),
+            Interpolate((100,100), 'bilinear'),
+            DeepLabHead(in_channels=512, num_classes=self.output_channels)
+        )
 
         # Check intermediate layers and sizes
         # summary(self.net.to('cuda:0'), (3, 800, 800), device='cuda') # IMPORTANT: INCLUDE non-Instance of torch.Tensor exclusion, otherwise exception
@@ -84,14 +83,14 @@ class Image2ImageModule(pl.LightningModule):
     
     def forward(self, x):
         x = self.net(x)
-        # return F.interpolate(x, size=(800,800), mode="bilinear", align_corners=False)
-        return x
+        return F.interpolate(x, size=(800,800), mode="bilinear", align_corners=False)
+        # return x
 
     def training_step(self, batch, batch_idx: int):
         # TODO maybe implement scheduler change once backbone is unfreezed
         img, traj = batch
         img = img.float()
-        traj_pred = self.forward(img)['out']
+        traj_pred = self.forward(img)#['out']
 
         if self.mode == 'img2img':
             train_loss = self.loss_fct(traj_pred.squeeze(), traj.float())
@@ -105,7 +104,7 @@ class Image2ImageModule(pl.LightningModule):
 
         img, traj = batch
         img = img.float()
-        traj_pred = self.forward(img)['out']
+        traj_pred = self.forward(img)#['out']
 
         if self.mode == 'img2img':
             val_loss = self.loss_fct(traj_pred.squeeze(), traj.float())

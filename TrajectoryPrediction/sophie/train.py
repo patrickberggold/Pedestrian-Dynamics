@@ -11,10 +11,11 @@ import torch.nn as nn
 import torch.optim as optim
 
 from data import data_loader
-from utils import get_dset_path
+from utils import get_dset_path, get_dset_path_floorplans
 from utils import relative_to_abs
 from utils import gan_g_loss, gan_d_loss, l2_loss, displacement_error, final_displacement_error
 from models import TrajectoryGenerator, TrajectoryDiscriminator
+from tqdm import tqdm
 
 from constants import *
 
@@ -28,14 +29,16 @@ def get_dtypes():
     return torch.cuda.LongTensor, torch.cuda.FloatTensor
 
 def main():
-    train_path = get_dset_path(DATASET_NAME, 'train')
-    val_path = get_dset_path(DATASET_NAME, 'val')
+    train_path = get_dset_path_floorplans('0__floorplan_zPos_0.0_roomWidth_0.24_numRleft_2.0_numRright_2.0')
+    val_path = get_dset_path_floorplans('0__floorplan_zPos_0.0_roomWidth_0.24_numRleft_2.0_numRright_2.0')
+    # train_path = get_dset_path(DATASET_NAME, 'train')
+    # val_path = get_dset_path(DATASET_NAME, 'val')
     long_dtype, float_dtype = get_dtypes()
 
     print("Initializing train dataset")
-    train_dset, train_loader = data_loader(train_path)
+    train_dset, train_loader = data_loader(train_path, split='train')
     print("Initializing val dataset")
-    _, val_loader = data_loader(val_path)
+    _, val_loader = data_loader(val_path, split='val')
 
     iterations_per_epoch = len(train_dset) / D_STEPS
     NUM_ITERATIONS = int(iterations_per_epoch * NUM_EPOCHS)
@@ -64,20 +67,27 @@ def main():
         d_steps_left = D_STEPS
         g_steps_left = G_STEPS
         epoch += 1
-        print('Starting epoch {}'.format(epoch))
+        # print('Starting epoch {}'.format(epoch))
+        pbar = tqdm(total = len(train_loader))
+        pbar.set_description(f'Epoch {epoch}', refresh=True)
         for batch in train_loader:
+            pbar.update(1)
             # batch = obs_traj, pred_traj_gt, obs_traj_rel, pred_traj_gt_rel, vgg_list
+            loss_dict = {}
             if d_steps_left > 0:
                 losses_d = discriminator_step(batch, generator,
                                               discriminator, gan_d_loss,
                                               optimizer_d)
                 d_steps_left -= 1
+                loss_dict.update({'D_total_loss': losses_d['D_total_loss']})
             elif g_steps_left > 0:
                 losses_g = generator_step(batch, generator,
                                           discriminator, gan_g_loss,
                                           optimizer_g)
                 g_steps_left -= 1
-
+                loss_dict.update({'G_total_loss': losses_g['G_total_loss']})
+            pbar.set_postfix({list(loss_dict.keys())[0]: list(loss_dict.values())[0]})
+            loss_dict = {}
             if d_steps_left > 0 or g_steps_left > 0:
                 continue
 
@@ -111,6 +121,7 @@ def main():
             g_steps_left = G_STEPS
             if t >= NUM_ITERATIONS:
                 break
+    pbar.close()
 
 def discriminator_step(batch, generator, discriminator, d_loss_fn, optimizer_d):
     

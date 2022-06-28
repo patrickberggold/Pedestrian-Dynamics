@@ -7,9 +7,11 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from constants import *
+from utils import Backbone
 
 def read_file(path, delim='\t'):
     data = []
+    assert os.path.isfile(path)
     with open(path, 'r') as f:
         for line in f:
             line = line.strip().split(delim)
@@ -28,32 +30,45 @@ def collate(data):
     # vgg_list = vgg_list.repeat(obs_seq.size(1), 1, 1) # IN: torch.tensor(batch_size*225x512), OUT: torch.tensor(batch_size*n_ped_per_seq x batch_size*225 x 512), I guess for each ped the same env.
     return tuple([obs_seq, pred_seq, obs_seq_rel, pred_seq_rel, vgg_list])
 
-def data_loader(path):
-    dset = TrajDataset(path)
+def data_loader(path, split):
+    dset = TrajDataset(path, split)
     loader = DataLoader(dset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, collate_fn=collate)
     return dset, loader
 
 class TrajDataset(Dataset):
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, split):
 
         super(TrajDataset, self).__init__()
-        all_files = [os.path.join(data_dir, path) for path in os.listdir(data_dir) if path[0] != "." and path.endswith(".txt")]
+        if split=='train':
+            all_files = [os.path.join(data_dir, f'variation_{idx}.txt') for idx in range(5)]
+            all_files = [os.path.join(data_dir, f'variation_{idx}.txt') for idx in range(1)]
+            delim = ','
+        elif split=='val':
+            all_files = [os.path.join(data_dir, 'variation_5.txt')]
+            delim = ','
+        elif split=='old':
+            all_files = [os.path.join(data_dir, path) for path in os.listdir(data_dir) if path[0] != "." and path.endswith(".txt")]
+            delim = '\t'
         num_peds_in_seq = []
         seq_list = []
         seq_list_rel = []
         seq_len = OBS_LEN + PRED_LEN
         fet_map = {}
         fet_list = []
+        backbone = Backbone()
 
         for path in all_files:
-            data = read_file(path) # frame, pedId, x, y
+            data = read_file(path, delim=delim) # frame, pedId, x, y
             frames = np.unique(data[:, 0]).tolist()
 
             hkl_path = os.path.splitext(path)[0] + ".pkl"
             # with open(hkl_path, 'rb') as handle:
             #     new_fet = pickle.load(handle, encoding='bytes')
             # fet_map[hkl_path] = torch.from_numpy(new_fet)
-            fet_map[hkl_path] = torch.rand(1, 15, 15, 512)
+            if split == 'old':
+                fet_map[hkl_path] = torch.rand(1, 15, 15, 512)
+            else:
+                fet_map[hkl_path] = backbone.forward_pass(path)
 
             frame_data = [data[frame == data[:, 0], :] for frame in frames] # restructure data into list with frame indices
             num_sequences = len(frames) - seq_len + 1

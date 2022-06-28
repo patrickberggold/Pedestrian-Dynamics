@@ -16,7 +16,7 @@ CUDA_DEVICE = 0 # 0, 1 or 'cpu'
 MODE = 'img2img' # implemented: img2img
 BATCH_SIZE = 4
 
-do_training = True
+do_training = False
 
 datamodule = FloorplanDataModule(mode = MODE, cuda_index = CUDA_DEVICE, batch_size = BATCH_SIZE)
 
@@ -27,7 +27,7 @@ if do_training:
 
     model_checkpoint = ModelCheckpoint(
         dirpath = SEP.join(['TrajectoryPrediction','sophie','feature_extractor','checkpoints']),
-        filename = 'model_deeplab_img2img_{epoch}-{step}',
+        filename = 'model_vgg_img2img_{epoch}-{step}',
         save_top_k = 1,
         verbose = True, 
         monitor = 'val_loss',
@@ -49,13 +49,13 @@ if do_training:
     trainer.fit(model, datamodule=datamodule)
     # automatically restores model, epoch, step, LR schedulers, apex, etc...
     # IMPORTANT: this will delete the old checkpoint!!
-    # trainer.fit(model, datamodule=datamodule, ckpt_path="Image2Image\checkpoints\checkpoints_DeepLab4Img2Img\model_grayscale_scale_RELUatEnd_BBunfreezeAt8_epoch=51-step=8112.ckpt")
+    # trainer.fit(model, datamodule=datamodule, ckpt_path="TrajectoryPrediction\\sophie\\feature_extractor\\checkpoints\\model_vgg_img2img_epoch=19-step=3120.ckpt")
     print(f'Training took {(time.time() - start_training_time)/60./(model.current_epoch+1):.3f} minutes per epoch...')
     
     quit()
 
 # Load stored model: keys in state_dict need to be adjusted
-CKPT_PATH = SEP.join(['TrajectoryPrediction','sophie','feature_extractor','checkpoints', 'model_img2img_epoch=75-step=11856.ckpt'])
+CKPT_PATH = SEP.join(['TrajectoryPrediction','sophie','feature_extractor','checkpoints', 'model_vgg_img2img_epoch=54-step=8580.ckpt'])
 state_dict = OrderedDict([(key, tensor) if key.startswith('net.') else (key, tensor) for key, tensor in torch.load(CKPT_PATH)['state_dict'].items()])
 # CKPT_PATH = SEP.join(['Image2Image', 'Optimization', 'ReLU_activation_at_end__l1_loss', 'model_optuna_optim___non_traj_vals__unfreeze.ckpt'])
 # state_dict = torch.load(CKPT_PATH)
@@ -80,20 +80,15 @@ for idx, batch in enumerate(testloader):
     img = batch[0].float().to(f'cuda:{CUDA_DEVICE}')
     traj = batch[1]
     # TODO ground truth trajectories are doing some weird stuff, basically at early timestamps they dont seem to be connected... -> Investigate by plotting same GT image + traj with increasing timestamp
-    traj_pred = model.forward(img)
-
-    if MODE == 'grayscale_movie':
-        # Flip batch and heads
-        traj = [traj_el.unsqueeze(0) for traj_el in traj]
-        traj = torch.cat(traj, dim=0).permute(1, 0, 2, 3)
-        traj_pred = torch.cat(traj_pred, dim=1)
-        
+    traj_pred = model.forward(img)#['out']
+       
     print(f'Saving plots in testload: {idx}/{len(testloader)}')
     
     for i in range(BATCH_SIZE):
 
         if MODE == 'img2img':
             traj_pred_np = traj_pred[i].transpose(0,1).transpose(1, 2).cpu().detach().numpy()
+            maxy = traj_pred_np.max()
             img_gt = traj[i].transpose(0,1).transpose(1, 2).detach().cpu().numpy()
             plt.imshow(img_gt)
             plt.imshow(traj_pred_np)

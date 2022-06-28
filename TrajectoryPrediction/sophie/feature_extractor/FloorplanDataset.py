@@ -126,7 +126,7 @@ class img2img_dataset(Dataset):
         # plt.imsave(f'test_input_img_{idx}.jpeg', img, vmin=0, vmax=255)
 
         if self.mode == 'img2img':
-            traj = np.array(h5py.File(traj_path, 'r').get('img')).astype('float32')
+            traj = np.array(h5py.File(traj_path, 'r').get('img')).astype('uint8')
 
         # Visualize trajectory for checking correctness
         # non_zeros = np.argwhere(traj != 0.)

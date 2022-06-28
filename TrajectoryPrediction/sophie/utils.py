@@ -2,13 +2,20 @@ import os
 import math
 import random
 import numpy as np
-
+from collections import OrderedDict
 import torch
+import torch.nn as nn
+import h5py
+from torchvision import transforms 
+from torchvision.models.vgg import vgg19_bn
 
 from constants import *
 
 def get_dset_path(dset_name, dset_type):
     return os.path.join('C:\\Users\\Remotey\\Documents\\Pedestrian-Dynamics\\TrajectoryPrediction\\sophie\\datasets', dset_name, dset_type)
+
+def get_dset_path_floorplans(dset_name):
+    return os.path.join('C:\\Users\\Remotey\\Documents\\Datasets\\CSV_SIMULATION_DATA_numAgents_50', dset_name)
 
 def relative_to_abs(rel_traj, start_pos):
     rel_traj = rel_traj.permute(1, 0, 2)
@@ -63,3 +70,41 @@ def final_displacement_error(
         return loss
     else:
         return torch.sum(loss)
+
+
+class Backbone():
+    def __init__(self) -> None:
+        ckpt_path = '\\'.join(['C:','Users','Remotey','Documents','Pedestrian-Dynamics','TrajectoryPrediction','sophie','feature_extractor','checkpoints', 'model_vgg_img2img_epoch=54-step=8580.ckpt'])
+        state_dict = OrderedDict([(key.replace('net.0.', ''), tensor) for key, tensor in torch.load(ckpt_path)['state_dict'].items() if key.startswith('net.0')])
+
+        self.model = vgg19_bn(pretrained=True, progress=True).features
+        self.model.load_state_dict(state_dict)
+        self.model.to(f'cuda:{CUDA_DEVICE}')
+        self.model.eval()
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+    def forward_pass(self, txt_path):
+
+        filename = txt_path.split("\\")[-1].replace("txt", "h5")
+        img_path = os.path.join(
+            '\\'.join(txt_path.split('\\')[:-3]),
+            'HDF5_INPUT_IMAGES_resolution_800_800',
+            txt_path.split('\\')[-2],
+            f'HDF5_floorplan_zPos_0.0_roomWidth_0.24_numRleft_2.0_numRright_2.0_{filename}'
+        )
+        assert os.path.isfile(img_path), f'Img file {img_path} does not exist!'
+        img = np.array(h5py.File(img_path, 'r').get('img'))
+        
+        # transform image to tensor
+        img = transforms.ToTensor()(img).unsqueeze(0).to(f'cuda:{CUDA_DEVICE}')
+
+        # forward pass
+        features = self.model.forward(img)
+        features = nn.AdaptiveAvgPool2d((15, 15))(features)
+        # features = features.detach().cpu().numpy()
+        features = features.transpose(1,2).transpose(2,3)
+
+        # requires_grad indicates whether a variable is trainable
+        # retain_grad() is used to signify that we should store the gradient on non-"leaf" variables to the "grad" attribute
+        return features
