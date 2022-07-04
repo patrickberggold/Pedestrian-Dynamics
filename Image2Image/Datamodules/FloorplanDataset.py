@@ -104,17 +104,18 @@ class semantic_dataset(Dataset):
         return files_list
 
 class img2img_dataset_traj_1D(Dataset):
-    def __init__(self, mode: str, img_paths: list, traj_paths: list, transform = None, non_traj_vals: float = 0., vary_area_brightness: bool = False, num_ts_per_floorplan: int = 1):
+    def __init__(self, mode: str, img_paths: list, traj_paths: list, transform = None, non_traj_vals: float = 0., max_traj_factor: float = 1.0, vary_area_brightness: bool = False, num_ts_per_floorplan: int = 1):
 
         self.transform = transform
         self.img_paths = img_paths
         self.traj_paths = traj_paths
         self.mode = mode
         self.non_traj_vals = non_traj_vals
+        self.max_traj_factor = max_traj_factor
         self.num_ts_per_floorplan = num_ts_per_floorplan
         self.vary_area_brightness = vary_area_brightness
 
-        assert mode in ['grayscale', 'rgb', 'bool', 'timeAndId', 'grayscale_movie'], 'Unknown mode setting!'
+        assert mode in ['grayscale', 'rgb', 'bool', 'timeAndId', 'grayscale_movie', 'counts'], 'Unknown mode setting!'
         assert len(self.traj_paths) == len(self.img_paths), 'Length of image paths and trajectory paths do not match, something went wrong!'
 
     def __len__(self):
@@ -151,7 +152,7 @@ class img2img_dataset_traj_1D(Dataset):
             # plt.imshow(img.astype('uint8'), vmin=0, vmax=255)
 
         if self.mode == 'grayscale':
-            traj = np.array(h5py.File(traj_path, 'r').get('img')).astype('float32')
+            traj = np.array(h5py.File(traj_path, 'r').get('img')).astype('float32')/self.max_traj_factor # self.max_traj_factor=89.5 normalizes the traj values for 40 agents
             # SETTING 1
             # Scale timestamp values with respect to maximum timestamp value
             # traj /= 89.5
@@ -161,6 +162,7 @@ class img2img_dataset_traj_1D(Dataset):
 
         elif self.mode == 'grayscale_movie':
             traj0 = np.array(h5py.File(traj_path, 'r').get('img')).astype('float32')
+            # traj0 /= traj0.max() # Normalization
             # ts_limits = [(i+1)*traj0.max()/self.num_ts_per_floorplan for i in range(self.num_ts_per_floorplan)]
             ts_limits = [i * traj0.max()/self.num_ts_per_floorplan for i in range(self.num_ts_per_floorplan+1)]
             traj = [traj0] + [traj0.copy() for i in range(1,self.num_ts_per_floorplan)]
@@ -173,6 +175,15 @@ class img2img_dataset_traj_1D(Dataset):
                 # traj[idx][traj[idx] > limit] = self.non_traj_vals
                 traj[idx][traj[idx] > ts_limits[idx+1]] = self.non_traj_vals
                 traj[idx][traj[idx] <= ts_limits[idx]] = self.non_traj_vals
+        
+        if self.mode == 'counts':
+            traj = np.array(h5py.File(traj_path, 'r').get('img')).astype('float32')[:,:,1] # self.max_traj_factor=89.5 normalizes the traj values for 40 agents
+            # SETTING 1
+            # Scale timestamp values with respect to maximum timestamp value
+            # traj /= 89.5
+            # traj[traj == 0.] = -0.02
+            # SETTING 2
+            traj[traj == 0] = self.non_traj_vals
 
         elif self.mode == 'rgb':
             traj = np.array(h5py.File(traj_path, 'r').get('img'))

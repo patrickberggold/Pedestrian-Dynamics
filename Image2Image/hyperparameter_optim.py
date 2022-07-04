@@ -5,6 +5,7 @@ import torch
 import optuna
 from optuna.integration import PyTorchLightningPruningCallback
 from models import Image2ImageModule
+from Datamodules import FloorplanDataModule
 from helper import SEP
 import json
  
@@ -40,8 +41,11 @@ def hyperparameter_optimization(
         lr_sch_gamma = trial.suggest_float("gamma", 0.3, 0.9)
         # non_traj_vals = trial.suggest_float("ntv", -7., -0.5)
         # unfreeze_backbone_epoch = trial.suggest_categorical
+        max_traj_val = trial.suggest_float("mtv", )
 
         module = Image2ImageModule(mode=mode, learning_rate=learning_rate, lr_sch_gamma=lr_sch_gamma, relu_at_end = True, num_heads=8)
+
+        # datamodule = FloorplanDataModule(mode = mode, cuda_index = cuda_device, batch_size = 4, num_ts_per_floorplan=8, vary_area_brightness=False)
 
         datamodule.set_non_traj_vals(new_val = 0.)
 

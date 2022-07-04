@@ -23,7 +23,7 @@ class Image2ImageModule(pl.LightningModule):
         ):
         super(Image2ImageModule, self).__init__()
         
-        assert mode in ['grayscale', 'rgb', 'bool', 'segmentation', 'timeAndId', 'grayscale_movie'], 'Unknown mode setting!'
+        assert mode in ['grayscale', 'rgb', 'bool', 'segmentation', 'timeAndId', 'grayscale_movie', 'counts'], 'Unknown mode setting!'
         
         self.mode = mode
         self.learning_rate = learning_rate
@@ -44,7 +44,7 @@ class Image2ImageModule(pl.LightningModule):
         else:
             raise NotImplementedError('Unknown loss function')
         
-        if self.mode == 'grayscale':
+        if self.mode == 'grayscale' or self.mode == 'counts':
             # Regression task
             self.output_channels = 1
         elif self.mode == 'bool':
@@ -114,7 +114,7 @@ class Image2ImageModule(pl.LightningModule):
             loss_CE = F.cross_entropy(traj_pred_ids, traj_ids.long(), ignore_index = 250)
             lambda_CE2MSE = 1.0 # lambda_CE2MSE = loss_MSE.item()/loss_CE.item()
             train_loss = lambda_CE2MSE * loss_CE + loss_regression
-        elif self.mode == 'grayscale' or self.mode == 'rgb':
+        elif self.mode in ['grayscale', 'rgb', 'counts']:
             train_loss = self.loss_fct(traj_pred.squeeze(), traj.float())
         elif self.mode == 'grayscale_movie':
             train_loss = sum([self.loss_fct(traj_pred_ts.squeeze(), traj[idx].float()) for idx, traj_pred_ts in enumerate(traj_pred)])
@@ -144,7 +144,7 @@ class Image2ImageModule(pl.LightningModule):
             loss_CE = F.cross_entropy(traj_pred_ids, traj_ids.long(), ignore_index = 250)
             lambda_CE2MSE = 1.0 # lambda_CE2MSE = loss_MSE.item()/loss_CE.item()
             val_loss = lambda_CE2MSE * loss_CE + loss_regression
-        elif self.mode == 'grayscale' or self.mode == 'rgb':
+        elif self.mode in ['grayscale', 'rgb', 'counts']:
             val_loss = self.loss_fct(traj_pred.squeeze(), traj.float())
         elif self.mode == 'grayscale_movie':
             val_loss = sum([self.loss_fct(traj_pred_ts.squeeze(), traj[idx].float()) for idx, traj_pred_ts in enumerate(traj_pred)])

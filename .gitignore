@@ -2,7 +2,10 @@ __pycache__/
 .vscode/
 image_results*/
 lightning_logs/
+logs/
 *.ckpt
 log.txt
 *.png
 Image2Image/Optimization/*
+*.pth
+*.mat

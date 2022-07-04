@@ -13,19 +13,19 @@ from torchvision import transforms
 from helper import get_color_from_array, SEP
 from hyperparameter_optim import hyperparameter_optimization
 
-CUDA_DEVICE = 1 # 0, 1 or 'cpu'
-MODE = 'grayscale_movie' # implemented: grayscale, rgb, bool, timeAndId, grayscale_movie
+CUDA_DEVICE = 0 # 0, 1 or 'cpu'
+MODE = 'counts' # implemented: grayscale, rgb, bool, timeAndId, grayscale_movie, 'counts'
 BATCH_SIZE = 4
 NUM_HEADS = 8
 
-do_training = False
-do_hyperparameter_optim = True
-
-datamodule = FloorplanDataModule(mode = MODE, cuda_index = CUDA_DEVICE, batch_size = BATCH_SIZE, num_ts_per_floorplan=NUM_HEADS, vary_area_brightness=True)
+do_training = True
+do_hyperparameter_optim = False
+# TODO pure rgb values inside the rgb array play an important role for training, maybe vary them? --> gt_img converted to tensor [0.0 - 1.0], floats so far at [0. - 89.5], what if change to [0. - 1.0] => tune max val as hyperpara?
+datamodule = FloorplanDataModule(mode = MODE, cuda_index = CUDA_DEVICE, max_traj_factor=1.0, batch_size = BATCH_SIZE, num_ts_per_floorplan=NUM_HEADS, vary_area_brightness=False)
 
 if do_hyperparameter_optim:
 
-    best_trial = hyperparameter_optimization(mode = MODE, datamodule = datamodule, n_trials = 50, epochs_per_trial = 25, cuda_device = CUDA_DEVICE, limit_train_batches = None, limit_val_batches = None)
+    best_trial = hyperparameter_optimization(mode = MODE, n_trials = 50, epochs_per_trial = 25, cuda_device = CUDA_DEVICE, limit_train_batches = None, limit_val_batches = None)
 
     if not do_training:
         quit()
@@ -37,7 +37,7 @@ if do_training:
 
     model_checkpoint = ModelCheckpoint(
         dirpath = SEP.join(['Image2Image','checkpoints', 'checkpoints_DeepLab4Img2Img']),
-        filename = 'model_grayscale_movie_numHeads8_flow_variedAreaBrightnesses_{epoch}-{step}',
+        filename = 'model_grayscale_COUNTS_{epoch}-{step}',
         save_top_k = 1,
         verbose = True, 
         monitor = 'val_loss',
@@ -65,9 +65,9 @@ if do_training:
     quit()
 
 # Load stored model: keys in state_dict need to be adjusted
-CKPT_PATH = SEP.join(['Image2Image', 'checkpoints', 'checkpoints_DeepLab4Img2Img', 'model_grayscale_movie_numHeads8_flow_epoch=16-step=2652.ckpt'])
+CKPT_PATH = SEP.join(['Image2Image', 'checkpoints', 'checkpoints_DeepLab4Img2Img', 'model_grayscale_MaxTimestampFactor_0.5_epoch=18-step=2964.ckpt'])
 state_dict = OrderedDict([(key.replace('net.', ''), tensor) if key.startswith('net.') else (key, tensor) for key, tensor in torch.load(CKPT_PATH)['state_dict'].items()])
-# CKPT_PATH = SEP.join(['Image2Image', 'Optimization', 'ReLU_activation_at_end__l1_loss', 'model_optuna_optim___non_traj_vals__unfreeze.ckpt'])
+# CKPT_PATH = SEP.join(['Image2Image', 'Optimization', 'grayscale_movie_numHeads8_flow_variedAreaBrightnesses', 'model_optuna_movie_numHeads8_flow_variedAreaBrightnesses.ckpt'])
 # state_dict = torch.load(CKPT_PATH)
 model = Image2ImageModule(mode=MODE, relu_at_end=True, num_heads=NUM_HEADS)
 model.net.load_state_dict(state_dict)
@@ -111,7 +111,7 @@ for idx, batch in enumerate(testloader):
             traj_pred_bigger_thresh = np.argwhere(traj_pred_np >= 1.0)
             pred_colors_from_timestamps = [get_color_from_array(traj_pred_np[x, y], 89.5)/255. for x, y in traj_pred_bigger_thresh]
             traj_pred_img = img_gt.copy()
-            traj_pred_img[traj_pred_bigger_thresh[:,0], traj_pred_bigger_thresh[:,1]] = np.array(pred_colors_from_timestamps)
+            if len(pred_colors_from_timestamps) > 0: traj_pred_img[traj_pred_bigger_thresh[:,0], traj_pred_bigger_thresh[:,1]] = np.array(pred_colors_from_timestamps)
 
             # Draw GT trajectories into floorplan
             traj_np = traj[i].detach().cpu().numpy()
@@ -151,6 +151,7 @@ for idx, batch in enumerate(testloader):
                 traj_pred_img_np = img_gt.copy()
                 traj_pred_np = traj_pred[i][i_head].cpu().detach().numpy()
                 traj_pred_bigger_thresh = np.argwhere(traj_pred_np >= 1.0)
+                # TODO (in case of normalization) visualize correctly... multiplication by 89.5 not correct because I am always calculating with the maximum timestep of the floorplan
                 pred_colors_from_timestamps = [get_color_from_array(traj_pred_np[x, y], 89.5)/255. for x, y in traj_pred_bigger_thresh]
                 if len(pred_colors_from_timestamps) > 0: traj_pred_img_np[traj_pred_bigger_thresh[:,0], traj_pred_bigger_thresh[:,1]] = np.array(pred_colors_from_timestamps)
                 traj_pred_imgs_np.append(traj_pred_img_np)
@@ -170,8 +171,11 @@ for idx, batch in enumerate(testloader):
                 axes[i_h,0].axis('off')
                 axes[i_h,1].imshow(traj_pred_imgs_np[i_h])
                 axes[i_h,1].axis('off')
-            plt.savefig(os.path.join(test_result_folder, f'floorplan_traj_movie_recon_{idx}_{i}.png'))
+            plt.savefig(os.path.join(test_result_folder, f'floorplan_traj_movie_recon_{idx}_{i}_optim.png'))
             plt.close('all')
+        
+        elif MODE == 'counts':
+            raise NotImplementedError('counts visualization needs to be implemented still!')
 
         elif MODE == 'timeAndId':
             # Get GT floorplan RGB
