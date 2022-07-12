@@ -7,18 +7,27 @@ import random
 import scipy.spatial
 import scipy.io
 
-def create_dataset(dataset_folder,dataset_name,val_size,gt,horizon,delim="\t",train=True,eval=False,verbose=False):
+def create_dataset(dataset_folder,dataset_name,val_size,gt,horizon,delim="\t",train=True,eval=False,verbose=False, do_floorplans=False):
 
-        if train==True:
-            datasets_list = os.listdir(os.path.join(dataset_folder,dataset_name, "train"))
-            full_dt_folder=os.path.join(dataset_folder,dataset_name, "train")
-        if train==False and eval==False:
-            datasets_list = os.listdir(os.path.join(dataset_folder, dataset_name, "val"))
-            full_dt_folder = os.path.join(dataset_folder, dataset_name, "val")
-        if train==False and eval==True:
-            datasets_list = os.listdir(os.path.join(dataset_folder, dataset_name, "test"))
-            full_dt_folder = os.path.join(dataset_folder, dataset_name, "test")
-
+        if not do_floorplans:
+            if train==True:
+                datasets_list = os.listdir(os.path.join(dataset_folder,dataset_name, "train"))
+                full_dt_folder=os.path.join(dataset_folder,dataset_name, "train")
+            if train==False and eval==False:
+                datasets_list = os.listdir(os.path.join(dataset_folder, dataset_name, "val"))
+                full_dt_folder = os.path.join(dataset_folder, dataset_name, "val")
+            if train==False and eval==True:
+                datasets_list = os.listdir(os.path.join(dataset_folder, dataset_name, "test"))
+                full_dt_folder = os.path.join(dataset_folder, dataset_name, "test")
+        
+        else:
+            full_dt_folder=os.path.join(dataset_folder,dataset_name)
+            if train==True:
+                datasets_list = [f'variation_{num}.txt' for num in range(3)]
+            if train==False and eval==False:
+                datasets_list = ['variation_3.txt', 'variation_4.txt']
+            if train==False and eval==True:
+                datasets_list = ['variation_5.txt', 'variation_6.txt']
 
         datasets_list=datasets_list
         data={}
@@ -85,7 +94,8 @@ def create_dataset(dataset_folder,dataset_name,val_size,gt,horizon,delim="\t",tr
             data_dt.append(dt_dataset)
             data_peds.append(dt_peds)
 
-
+            if verbose:
+                print(f"appending {inp.shape[0]} sequences from {dt}")
 
 
 
@@ -97,8 +107,8 @@ def create_dataset(dataset_folder,dataset_name,val_size,gt,horizon,delim="\t",tr
         data['peds'] = np.concatenate(data_peds, 0)
         data['dataset_name'] = datasets_list
 
-        mean= data['src'].mean((0,1))
-        std= data['src'].std((0,1))
+        mean= data['src'].mean((0,1)) # mean over x, y, speed_x, speed_y
+        std= data['src'].std((0,1)) # std over x, y, speed_x, speed_y
 
         if val_size>0:
             data_val={}
@@ -232,23 +242,28 @@ def get_strided_data_clust(dt, gt_size, horizon, step):
     inp_te = []
     dtt = dt.astype(np.float32)
     raw_data = dtt
-
+    raw_data_np = raw_data.to_numpy()
     ped = raw_data.ped.unique()
     frame=[]
     ped_ids=[]
     for p in ped:
-        for i in range(1+(raw_data[raw_data.ped == p].shape[0] - gt_size - horizon) // step):
-            frame.append(dt[dt.ped == p].iloc[i * step:i * step + gt_size + horizon, [0]].values.squeeze())
+        ped_dt = raw_data[raw_data.ped == p]
+        ped_timestep_width = ped_dt.shape[0] - gt_size - horizon
+        for i in range(1+ped_timestep_width // step):
+            frame.append(dt[dt.ped == p].iloc[i * step:i * step + gt_size + horizon, [0]].values.squeeze()) # Appending 20 time frames
             # print("%i,%i,%i" % (i * 4, i * 4 + gt_size, i * 4 + gt_size + horizon))
-            inp_te.append(raw_data[raw_data.ped == p].iloc[i * step:i * step + gt_size + horizon, 2:4].values)
-            ped_ids.append(p)
+            inp_te.append(raw_data[raw_data.ped == p].iloc[i * step:i * step + gt_size + horizon, 2:4].values) # Appending 20 positions
+            ped_ids.append(p) # Appending the pedId
 
     frames=np.stack(frame)
-    inp_te_np = np.stack(inp_te)
+    inp_te_np = np.stack(inp_te) # shape: (#peds, 20, 2)
     ped_ids=np.stack(ped_ids)
 
     #inp_relative_pos= inp_te_np-inp_te_np[:,:1,:]
-    inp_speed = np.concatenate((np.zeros((inp_te_np.shape[0],1,2)),inp_te_np[:,1:,0:2] - inp_te_np[:, :-1, 0:2]),1)
+    starting_zeros = np.zeros((inp_te_np.shape[0],1,2)) # shape: (#peds, 1, 2)
+    subs_steps = inp_te_np[:,1:,0:2] # shape: (#peds, 19, 2)
+    prev_steps = inp_te_np[:, :-1, 0:2] # shape: (#peds, 19, 2)
+    inp_speed = np.concatenate((starting_zeros, subs_steps - prev_steps),1) # velocities (through subtraction) starting with (0, 0) for each sequence
     #inp_accel = np.concatenate((np.zeros((inp_te_np.shape[0],1,2)),inp_speed[:,1:,0:2] - inp_speed[:, :-1, 0:2]),1)
     #inp_std = inp_no_start.std(axis=(0, 1))
     #inp_mean = inp_no_start.mean(axis=(0, 1))

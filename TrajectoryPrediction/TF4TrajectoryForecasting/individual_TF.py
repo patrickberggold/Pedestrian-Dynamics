@@ -30,8 +30,7 @@ class IndividualTF(nn.Module):
         self.std=np.array(std)
         self.model = EncoderDecoder(
             Encoder(EncoderLayer(d_model, c(attn), c(ff), dropout), N),
-            Decoder(DecoderLayer(d_model, c(attn), c(attn),
-                                 c(ff), dropout), N),
+            Decoder(DecoderLayer(d_model, c(attn), c(attn), c(ff), dropout), N),
             nn.Sequential(LinearEmbedding(enc_inp_size,d_model), c(position)),
             nn.Sequential(LinearEmbedding(dec_inp_size,d_model), c(position)),
             Generator(d_model, dec_out_size))
@@ -42,12 +41,10 @@ class IndividualTF(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
-
-
-
-
     def forward(self, *input):
         return self.model.generator(self.model(*input))
+
+
 
 class LinearEmbedding(nn.Module):
     def __init__(self, inp_size,d_model):

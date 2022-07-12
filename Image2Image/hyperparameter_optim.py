@@ -8,15 +8,16 @@ from models import Image2ImageModule
 from Datamodules import FloorplanDataModule
 from helper import SEP
 import json
+from collections import OrderedDict
  
 ROOT_PATH = SEP.join(['Image2Image', 'Optimization'])
-OPTIMIZATION_NAME = 'grayscale_movie_numHeads8_flow_variedAreaBrightnesses'
+OPTIMIZATION_NAME = 'grayscale_thickness_5_gammaStep_5_plusCosAnn_RedPlat_contFromTrain'
 FOLDER_NAME = os.path.join(ROOT_PATH, OPTIMIZATION_NAME)
 if not os.path.isdir(FOLDER_NAME): os.mkdir(FOLDER_NAME)
 
-MODEL_FILENAME = 'model_optuna_movie_numHeads8_flow_variedAreaBrightnesses.ckpt'
+MODEL_FILENAME = 'model_optuna_grayscale_thickness_5_gammaStep_5.ckpt'
 LOG_FILENAME = os.path.join(FOLDER_NAME, 'log.txt')
-
+# TODO implement visual TF as backbone
 def hyperparameter_optimization(
     mode: str, 
     datamodule: pl.LightningDataModule, 
@@ -36,21 +37,24 @@ def hyperparameter_optimization(
 
         # Hyperparameters to be optimized
         learning_rate = trial.suggest_float("lr", 5e-4, 1e-2)
-        # lr_scheduler = trial.suggest_categorical("sch", ['CosineAnnealingLR', 'StepLR', 'ReduceLROnPlateau'])
+        lr_scheduler = trial.suggest_categorical("sch", ['CosineAnnealingLR', 'StepLR', 'ReduceLROnPlateau'])
         # lr_sch_step_size = trial.suggest_int("step_size", 4, 12)
-        lr_sch_gamma = trial.suggest_float("gamma", 0.3, 0.9)
+        lr_sch_gamma = trial.suggest_float("gamma", 0.3, 0.6)
         # non_traj_vals = trial.suggest_float("ntv", -7., -0.5)
         # unfreeze_backbone_epoch = trial.suggest_categorical
-        max_traj_val = trial.suggest_float("mtv", )
+        # max_traj_val = trial.suggest_float("mtv", )
 
-        module = Image2ImageModule(mode=mode, learning_rate=learning_rate, lr_sch_gamma=lr_sch_gamma, relu_at_end = True, num_heads=8)
+        # CKPT_PATH = SEP.join(['Image2Image', 'checkpoints', 'checkpoints_DeepLab4Img2Img', 'model_grayscale_lineThickness5_CosAnn_Step5_Lr122_Gam42_epoch=36-step=5772.ckpt'])
+        # state_dict = OrderedDict([(key.replace('net.', ''), tensor) if key.startswith('net.') else (key, tensor) for key, tensor in torch.load(CKPT_PATH)['state_dict'].items()])
+        module = Image2ImageModule(mode=mode, learning_rate=learning_rate, lr_scheduler=lr_scheduler, lr_sch_step_size=5,lr_sch_gamma=lr_sch_gamma, relu_at_end = True, num_heads=8)
+        # module.net.load_state_dict(state_dict)
 
         # datamodule = FloorplanDataModule(mode = mode, cuda_index = cuda_device, batch_size = 4, num_ts_per_floorplan=8, vary_area_brightness=False)
 
         datamodule.set_non_traj_vals(new_val = 0.)
 
         # TODO implement feedback when trials are pruned
-        hyperparameters = dict(lr=learning_rate, gamma=lr_sch_gamma)
+        hyperparameters = dict(lr=learning_rate, gamma=lr_sch_gamma, sch=lr_scheduler)
 
         start_trial_string = f'\n#################################################################################################################' + \
             f'\nSTARTING NEW TRIAL {trial.number+1}/{n_trials} WITH {epochs_per_trial} EPOCHS PER TRIAL with:\n'
@@ -93,7 +97,8 @@ def hyperparameter_optimization(
                 'Saving best model from hyperparameter optimization... Model hyperparameters:\n'
             for key in trial.user_attrs:
                 if key != "model_state_dict":
-                    string_8 += f'{key}:{trial.user_attrs[key]:.5f}\n'
+                    key_val = f'{trial.user_attrs[key]:.5f}' if not isinstance(trial.user_attrs[key], str) else f'{trial.user_attrs[key]}'
+                    string_8 += f'{key}:{key_val}\n'
                     json_hyperparams.update({key: trial.user_attrs[key]})
             print(string_8)
             

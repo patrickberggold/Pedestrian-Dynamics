@@ -22,7 +22,7 @@ def subsequent_mask(size):
     Mask out subsequent positions.
     """
     attn_shape = (1, size, size)
-    mask = numpy.triu(numpy.ones(attn_shape), k=1).astype('uint8')
+    mask = numpy.triu(numpy.ones(attn_shape), k=1).astype('uint8') # upper triangle matrix where lower triangle are zeros, k determines where triangle starts
     return torch.from_numpy(mask) == 0
 
 
