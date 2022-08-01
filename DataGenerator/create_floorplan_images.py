@@ -1,15 +1,11 @@
-import argparse
-import enum
 import os
 import xml.etree.ElementTree as ET
 import numpy as np
 import pylab as plt
 from matplotlib.path import Path
 import math
-from requests import delete
 from matplotlib import cm
 from matplotlib.colors import ListedColormap, LinearSegmentedColormap
-import pickle
 import h5py
 from scipy import ndimage
 from create_crowdit_projects import export2crowdit_project
@@ -77,6 +73,7 @@ def preprocess_delete_short_lines(line_list):
     preprocessed_line_list = []
     deleted_lines = []
     line_delete_count = 0
+    duplicate_lines = []
     for key in lines_per_point:
         assert lines_per_point[key][0] >= 2
         if lines_per_point[key][0] > 2:
@@ -110,7 +107,7 @@ def preprocess_delete_short_lines(line_list):
             if line not in preprocessed_line_list:
                 preprocessed_line_list.append(line)
             else:
-                a =4
+                duplicate_lines.append(line)
     
     return preprocessed_line_list, deleted_lines
 
@@ -190,7 +187,7 @@ def get_wall_lines_from_crowdit_xml(xml_filename):
     
     return wall_lines, origin_lines, destination_lines, {'min_x': min_x, 'max_x': max_x, 'min_y': min_y, 'max_y': max_y}
 
-def get_wall_lines_from_pdf2xml_converter(xml_filename):
+def get_wall_lines_from_pdf2xml_converter(xml_filename, dxf_sizes):
 
     tree = ET.parse(xml_filename)
     root = tree.getroot()
@@ -222,13 +219,14 @@ def get_wall_lines_from_pdf2xml_converter(xml_filename):
                 #print(grandchild.tag, grandchild.attrib)
         #print(child.tag, child.attrib)
     
-    min_x_dxf = -0.15
-    min_y_dxf = -0.15
-    max_x_dxf = 20.15
-    max_y_dxf = 20.15
+    min_x_dxf = dxf_sizes['x'][0]
+    min_y_dxf = dxf_sizes['y'][0]
+    max_x_dxf = dxf_sizes['x'][1]
+    max_y_dxf = dxf_sizes['y'][1]
 
     wall_lines_proj = []
 
+    # project from pdf to dxf
     for line in wall_lines:
         line_proj = []
         for point in line:
@@ -240,20 +238,24 @@ def get_wall_lines_from_pdf2xml_converter(xml_filename):
             line_proj.append((x_proj, y_proj))
         wall_lines_proj.append(line_proj)
 
-    #return wall_lines_proj, origin_lines, destination_lines, {'min_x': min_x, 'max_x': max_x, 'min_y': min_y, 'max_y': max_y}
-    return wall_lines_proj, {'min_x': min_x_dxf, 'max_x': max_x_dxf, 'min_y': min_y_dxf, 'max_y': max_y_dxf}
+    return wall_lines_proj
 
 def get_sorted_polynomial_point_list(line_list):
     sorted_points_list = [line_list[0][0], line_list[0][1]]
     del line_list[0]
 
-    rectangle_points_list = []
+    closed_polygons = []
 
     def point_not_in_list(list_to_query, line_to_check):
         if line_to_check not in list_to_query: return True
         else: return False # basically the closing point (if point already in the list)
 
     def get_next_point(list_to_query, startpoint):
+        res_ones = [(el[0], idp1) for idp1, el in enumerate(list_to_query) if el[0] == startpoint]
+        res_twos = [(el[1], idp2) for idp2, el in enumerate(list_to_query) if el[1] == startpoint]
+
+        assert len(res_ones)+len(res_twos), 'more than one entry for a point'
+
         for line_idx, line in enumerate(list_to_query):
             for coord_idx, point in enumerate(line):
                 if point[0] == startpoint[0] and point[1] == startpoint[1]:
@@ -267,150 +269,186 @@ def get_sorted_polynomial_point_list(line_list):
         raise ValueError('Couldnt find successive point to given startpoint')
 
     while len(line_list) > 0:
-        found_line = get_next_point(line_list, sorted_points_list[-1])
-        if found_line and point_not_in_list(sorted_points_list, found_line):
-            sorted_points_list.append(found_line)
+        next_point = get_next_point(line_list, sorted_points_list[-1])
+        if next_point and point_not_in_list(sorted_points_list, next_point):
+            sorted_points_list.append(next_point)
         else:
-            rectangle_points_list.append(sorted_points_list)
+            closed_polygons.append(sorted_points_list)
             if len(line_list) > 0:
                 sorted_points_list = [line_list[0][0], line_list[0][1]]
                 del line_list[0]
 
-    return sorted_points_list
+    return closed_polygons[1:] # asserting that the first closed polygon corresponds to exterior wall which arent necessary
 
-def create_input_images_and_crowdit_projects(xml_filename, root_dir, origins, destinations, class_names, resolutions):
+def create_input_images_and_crowdit_projects(xml_filename, root_dir, origins, destinations, obstacles, class_names, resolutions, setting = 'original'):
 
     assert len(resolutions) == 2
-    resolution_width, resolution_height = resolutions[0], resolutions[1]
+    resolution_width, resolution_height = (resolutions['x'][1]-resolutions['x'][0])/20.*800, (resolutions['y'][1]-resolutions['y'][0])/20.*800
+    # round to next lowest hundred
+    resolution_width, resolution_height = int(resolution_width/100)*100, int(resolution_height/100)*100
 
-    img_variations_dir = os.path.join('\\'.join(xml_filename.split('\\')[:-1]), f'img_variations_resolution_{resolution_width}_{resolution_height}')
+    img_variations_dir = os.path.join('\\'.join(xml_filename.split('\\')[:-1]), f'img_variations_resolution_{int(resolution_width)}_{int(resolution_height)}')
 
     if not os.path.isdir(img_variations_dir):
         os.mkdir(img_variations_dir)
 
     # Separate GT segmented images directory
-    array_gt_variations_dir = os.path.join(root_dir, f'..\\HDF5_GT_resolution_{resolution_width}_{resolution_height}')
-    if not os.path.isdir(array_gt_variations_dir):
-        os.mkdir(array_gt_variations_dir)
+    array_gt_variations_dir = os.path.join(root_dir, f'..\\HDF5_GT_resolution_{int(resolution_width)}_{int(resolution_height)}')
+    # if not os.path.isdir(array_gt_variations_dir):
+    #     os.mkdir(array_gt_variations_dir)
+
+    HDF_STORE_PATH = 'C:\\Users\\ga78jem\\Documents\\Revit\\ADVANCED_FLOORPLANS'
+    if not os.path.isdir(HDF_STORE_PATH): os.mkdir(HDF_STORE_PATH)
 
     # Separate flooplan images directory
-    array_images_variations_dir = os.path.join(root_dir, f'..\\HDF5_IMAGES_resolution_{resolution_width}_{resolution_height}')
-    if not os.path.isdir(array_images_variations_dir):
-        os.mkdir(array_images_variations_dir)
+    array_images_variations_dir = os.path.join(HDF_STORE_PATH, root_dir.split('\\')[-1])
+    if not os.path.isdir(array_images_variations_dir): os.mkdir(array_images_variations_dir)
 
-    wall_lines, limits = get_wall_lines_from_pdf2xml_converter(xml_filename)
+    wall_lines = get_wall_lines_from_pdf2xml_converter(xml_filename, resolutions)
 
-    min_x = limits['min_x']
-    max_x = limits['max_x']
-    min_y = limits['min_y']
-    max_y = limits['max_y']
+    min_x_dxf = resolutions['x'][0]
+    min_y_dxf = resolutions['y'][0]
+    max_x_dxf = resolutions['x'][1]
+    max_y_dxf = resolutions['y'][1]
 
     # delete small, unnecessary lines between outside wall and interior
     preprocessed_lines, deleted_lines = preprocess_delete_short_lines(wall_lines)
 
-    # export2crowdit_project(preprocessed_lines, origins, destinations, xml_filename.split('\\')[-2])
-
+    export2crowdit_project(preprocessed_lines, origins, destinations, obstacles, '\\'.join(xml_filename.split('\\')[-3:-1]))
+    
     # line_plotter(preprocessed_lines)
-    # sort points to form a polygon
-    wall_points_sorted = get_sorted_polynomial_point_list(preprocessed_lines) # exclude outer walls for now
+    # project polygon points
+    # import cv2
+    proj_lines = []
+    repeated_lines = []
+    # img = np.zeros((resolution_height, resolution_width, 3))
+    for line in preprocessed_lines:
+        proj_line = []
+        for point in line:
+            x_proj = int(linear_interpolation(float(point[0]), min_x_dxf, max_x_dxf, 0, resolution_width))
+            y_proj = int(linear_interpolation(float(point[1]), min_y_dxf, max_y_dxf, 0, resolution_height))
+            proj_line.append((x_proj, y_proj))
+        if proj_line not in proj_lines:
+            proj_lines.append(proj_line)
+            # cv2.line(img, (proj_line[0][0], proj_line[0][1]), (proj_line[1][0], proj_line[1][1]), (0,1.,0), thickness=5)
+        else:
+            repeated_lines.append(proj_line)
+    
+    # plt.imshow(img)
+    layout_mask = np.zeros((resolution_width, resolution_height)).astype(int) # new
+    
+    closed_polygon_point_lists = get_sorted_polynomial_point_list(proj_lines) # exclude outer walls for now
+    
+    for idx, polygon_points in enumerate(closed_polygon_point_lists):
 
-    polygon = []
-    # project wall corners to image resolution
-    for id, point in enumerate(wall_points_sorted):
-        # project floor plan dimensions to given resolution
-        x_proj = int(linear_interpolation(float(point[0]), min_x, max_x, 0, resolution_width))
-        y_proj = int(linear_interpolation(float(point[1]), min_y, max_y, 0, resolution_height))
-        polygon.append((x_proj, y_proj))
+        origin_rectangles_projected = []
+        destination_rectangles_projected = []
 
-    origin_rectangles_projected = []
-    destination_rectangles_projected = []
+
+        poly_path=Path(polygon_points)
+
+        x, y = np.mgrid[:resolution_width, :resolution_height]
+        coors = np.hstack((x.reshape(-1, 1), y.reshape(-1,1)))
+
+        mask = poly_path.contains_points(coors)
+        base_mask = mask.reshape(resolution_width, resolution_height)
+        base_mask = np.array(base_mask).astype(int)
+        if idx < 1 and setting != 'train_station':
+            # switch true or false values to make multiple polygons compatible
+            base_mask = 1-base_mask
+
+        layout_mask = np.add(layout_mask, base_mask)
+
+        # plt.imshow(base_mask)
+        # plt.imshow(layout_mask)
 
     # project origins and destinations to image resolution
-    for origin in origins:
-        edges_proj = []
-        for edge in origin:
-            x = edge[0]
-            y = edge[1]
-            x_proj = int(linear_interpolation(x, min_x, max_x, 0, resolution_width))
-            y_proj = int(linear_interpolation(y, min_y, max_y, 0, resolution_height))
-            edges_proj.append((x_proj, y_proj))
-        origin_rectangles_projected.append(edges_proj)
+    for destination_areas in destinations:
+        areas = []
+        for destination in destination_areas:
+            edges_proj = []
+            for edge in destination[:2]:
+                x = edge[0]
+                y = edge[1]
+                assert min_x_dxf <= x <= max_x_dxf
+                assert min_y_dxf <= y <= max_y_dxf
+                x_proj = int(linear_interpolation(x, min_x_dxf, max_x_dxf, 0, resolution_width))
+                y_proj = int(linear_interpolation(y, min_y_dxf, max_y_dxf, 0, resolution_height))
+                edges_proj.append((x_proj, y_proj))
+            areas.append(edges_proj)
+        destination_rectangles_projected.append(areas)
     
-    for destination in destinations:
-        edges_proj = []
-        for edge in destination:
-            x = edge[0]
-            y = edge[1]
-            x_proj = int(linear_interpolation(x, min_x, max_x, 0, resolution_width))
-            y_proj = int(linear_interpolation(y, min_y, max_y, 0, resolution_height))
-            edges_proj.append((x_proj, y_proj))
-        destination_rectangles_projected.append(edges_proj)
-
-    poly_path=Path(polygon)
-
-    x, y = np.mgrid[:resolution_width, :resolution_height]
-    coors = np.hstack((x.reshape(-1, 1), y.reshape(-1,1)))
-
-    mask = poly_path.contains_points(coors)
-    base_mask = mask.reshape(resolution_width, resolution_height)
-    base_mask = np.array(base_mask).astype(int)
-
-    # plt.imshow(masked_img)
+    for origin_areas in origins:
+        areas = []
+        for origin in origin_areas:
+            edges_proj = []
+            for edge in origin[:2]:
+                x = edge[0]
+                y = edge[1]
+                assert min_x_dxf <= x <= max_x_dxf
+                assert min_y_dxf <= y <= max_y_dxf
+                x_proj = int(linear_interpolation(x, min_x_dxf, max_x_dxf, 0, resolution_width))
+                y_proj = int(linear_interpolation(y, min_y_dxf, max_y_dxf, 0, resolution_height))
+                edges_proj.append((x_proj, y_proj))
+            areas.append(edges_proj)
+        origin_rectangles_projected.append(areas)
 
     base_image = np.zeros((resolution_width, resolution_height, 3))
-    one_coords_base_image = np.argwhere(base_mask==1)
-    base_image[one_coords_base_image[:,0], one_coords_base_image[:,1]] = np.array([255, 255, 255])
 
-    for idx, origin in enumerate(origin_rectangles_projected):
-        masked_img = base_mask.copy()
+    zero_coords_base_image = np.argwhere(layout_mask==0)
+    base_image[zero_coords_base_image[:,0], zero_coords_base_image[:,1]] = np.array([255, 255, 255])
+    # plt.imshow(layout_mask)
+    img_store_path = os.path.join('\\'.join(xml_filename.split('\\')[:-1]), 'base_floorplan.jpeg')
+
+    for obstacle in obstacles:
+        x_obs_start, x_obs_end = obstacle[0][0], obstacle[1][0]
+        y_obs_start, y_obs_end = obstacle[0][1], obstacle[1][1]
+
+        assert min_x_dxf <= x_obs_start <= max_x_dxf
+        assert min_x_dxf <= x_obs_end <= max_x_dxf
+        assert min_y_dxf <= y_obs_start <= max_y_dxf
+        assert min_y_dxf <= y_obs_end <= max_y_dxf
+
+        # project obstacle points to resolution
+        x_obs_start = int(linear_interpolation(x_obs_start, min_x_dxf, max_x_dxf, 0, resolution_width))
+        x_obs_end = int(linear_interpolation(x_obs_end, min_x_dxf, max_x_dxf, 0, resolution_width))
+        y_obs_start = int(linear_interpolation(y_obs_start, min_y_dxf, max_y_dxf, 0, resolution_height))
+        y_obs_end = int(linear_interpolation(y_obs_end, min_y_dxf, max_y_dxf, 0, resolution_height))
+
+        black_coords = np.array([(x_dst, y_dst) for x_dst in range(x_obs_start, x_obs_end) for y_dst in range(y_obs_start, y_obs_end)])
+
+        base_image[black_coords[:,0], black_coords[:,1]] = np.array([0, 0, 0])
+
+    plt.imsave(img_store_path, ndimage.rotate(base_image, 90).astype(np.uint8), vmin=0, vmax=255)
+
+    for idx, (origin_areas, destination_areas) in enumerate(zip(origin_rectangles_projected, destination_rectangles_projected)):
+        # masked_img = layout_mask.copy()
         image_array = base_image.copy()
+        for origin in origin_areas:
 
-        x_or_start, x_or_end = origin[0][0], origin[1][0]
-        y_or_start, y_or_end = origin[0][1], origin[1][1]
-       
-        red_coords = np.array([(x_or, y_or) for x_or in range(x_or_start, x_or_end) for y_or in range(y_or_start, y_or_end)])
+            x_or_start, x_or_end = origin[0][0], origin[1][0]
+            y_or_start, y_or_end = origin[0][1], origin[1][1]
+        
+            red_coords = np.array([(x_or, y_or) for x_or in range(x_or_start, x_or_end) for y_or in range(y_or_start, y_or_end)])
 
-        image_array[red_coords[:,0], red_coords[:,1]] = np.array([255, 0, 0])
-        masked_img[red_coords[:,0], red_coords[:,1]] = 2
+            image_array[red_coords[:,0], red_coords[:,1]] = np.array([255, 0, 0])
+            # masked_img[red_coords[:,0], red_coords[:,1]] = 2
 
-        destination = destination_rectangles_projected[idx]
+        for destination in destination_areas:
 
-        x_dst_start, x_dst_end = destination[0][0], destination[1][0]
-        y_dst_start, y_dst_end = destination[0][1], destination[1][1]
+            x_dst_start, x_dst_end = destination[0][0], destination[1][0]
+            y_dst_start, y_dst_end = destination[0][1], destination[1][1]
 
-        green_coords = np.array([(x_dst, y_dst) for x_dst in range(x_dst_start, x_dst_end) for y_dst in range(y_dst_start, y_dst_end)])
+            green_coords = np.array([(x_dst, y_dst) for x_dst in range(x_dst_start, x_dst_end) for y_dst in range(y_dst_start, y_dst_end)])
 
-        image_array[green_coords[:,0], green_coords[:,1]] = np.array([0, 255, 0])
-        masked_img[green_coords[:,0], green_coords[:,1]] = 3
+            image_array[green_coords[:,0], green_coords[:,1]] = np.array([0, 255, 0])
+            # masked_img[green_coords[:,0], green_coords[:,1]] = 3
 
         image_array = ndimage.rotate(image_array, 90)
-        masked_img = ndimage.rotate(masked_img, 90)
+        # masked_img = ndimage.rotate(masked_img, 90)
 
         # plt.axis('off')
         # plt.imshow(image_array, vmin=0, vmax=255)
-
-    # for idx, origin in enumerate(origin_rectangles_projected):
-        # destination = destination_rectangles_projected[idx]
-        # for x_or in range(origin[0][0], origin[1][0]):
-        #     for y_or in range(origin[0][1], origin[1][1]):
-        #         masked_img[x_or,y_or] = 2
-        #         image_array[x_or,y_or] = np.array([255, 0, 0])
-
-        
-        # for x_dst in range(destination[0][0], destination[1][0]):
-        #     for y_dst in range(destination[0][1], destination[1][1]):
-        #         masked_img[x_dst,y_dst] = 3
-        #         image_array[x_dst,y_dst] = np.array([0, 255, 0])
-
-        # plt.imshow(image_array, vmin=0, vmax=255)
-
-        # plt.axis('off')
-        #####################################################################################
-        ################################### VISUALIZATION ###################################
-        #####################################################################################
-        # fig, ax = plt.subplots()
-        # plt.axis('off')
-        # ax.matshow(masked_img, cmap=get_customized_colormap(class_names))#plt.cm.Blues)
 
         # Logging
         cropped_print = xml_filename.split("\\")[-2].split("__")[0]
@@ -418,11 +456,12 @@ def create_input_images_and_crowdit_projects(xml_filename, root_dir, origins, de
         
         # save mask + colormap (ground truth)
         img_store_path = os.path.join(img_variations_dir, xml_filename.split('\\')[-1].replace('.xml', f'_variation_{idx}.jpeg'))
-        plt.imsave(img_store_path.replace('.jpeg', '_gt_mask.jpeg'), masked_img, cmap=get_customized_colormap(class_names))
+        # plt.imsave(img_store_path.replace('.jpeg', '_gt_mask.jpeg'), masked_img, cmap=get_customized_colormap(class_names))
         # save RGB image (train data)
-        plt.imsave(img_store_path.replace('.jpeg', '_input_img.jpeg'), image_array.astype(np.uint8), vmin=0, vmax=255)#
+        if idx < 300:
+            plt.imsave(img_store_path, image_array.astype(np.uint8), vmin=0, vmax=255)#
         
-        # SAVE INPUT IMG ARRAY AS HDF5
+        # # SAVE INPUT IMG ARRAY AS HDF5
         subgroup_folder = os.path.join(array_images_variations_dir, xml_filename.split('\\')[-2])
         if not os.path.isdir(subgroup_folder):
             os.mkdir(subgroup_folder)
@@ -431,46 +470,3 @@ def create_input_images_and_crowdit_projects(xml_filename, root_dir, origins, de
         hf = h5py.File(store_path, 'w')
         hf.create_dataset('img', data=image_array.astype(np.uint8))
         hf.close()
-
-        # SAVE HDF5 GROUND TRUTH DATA
-        subgroup_folder = os.path.join(array_gt_variations_dir, xml_filename.split('\\')[-2])
-        if not os.path.isdir(subgroup_folder):
-            os.mkdir(subgroup_folder)
-        store_path = os.path.join(subgroup_folder, 'HDF5_'+xml_filename.split('\\')[-1].replace('.xml', f'_variation_{idx}.h5'))
-
-        # return mask, add 1 to include background (which needs to be 0)
-        masked_img += 1
-
-        hf = h5py.File(store_path, 'w')
-        hf.create_dataset('img', data=masked_img)
-        hf.close()
-
-        # with open(os.path.join(subgroup_folder, 'classes.txt'), 'w') as fcl:
-        #     fcl.write(f'0: background\n')
-        #     for idx, key in enumerate(class_names):
-        #         fcl.write(f'{idx+1}: {key}\n')
-        # fcl.close()
-
-        # plot saved hdf5 image
-        # hf = h5py.File(store_path, 'r')
-        # ds = hf.get('img')
-        # ds = np.array(ds)
-        # plt.imshow(ds, vmin=0, vmax=255)
-
-        # Pickle
-        # with open(os.path.join(array_variations_dir, 'PICKLE_'+xml_filename.split('\\')[-1].replace('.xml', f'_variation_{idx}.pkl')),'wb') as f: pickle.dump(masked_img, f)
-        # f.close()
-
-        # Numpy
-        # np.save(os.path.join(array_variations_dir, 'NUMPY_'+xml_filename.split('\\')[-1].replace('.xml', f'_variation_{idx}.npy')), masked_img)
-
-
-    # for i in range(15):
-    #     for j in range(15):
-    #         c = img[j,i]
-    #         ax.text(i, j, str(c), va='center', ha='center')
-
-    #plt.imshow(img)
-    # plt.show()
-
-    # quit()
