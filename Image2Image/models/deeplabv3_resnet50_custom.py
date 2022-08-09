@@ -1,4 +1,5 @@
-from typing import List, Optional, Dict
+from turtle import forward
+from typing import List, Optional, Dict, Tuple
 from collections import OrderedDict
 
 import torch
@@ -49,12 +50,13 @@ class DeepLabV3(_SimpleSegmentationModel):
 class DeepLabV3MulitHead(nn.Module):
     __constants__ = ["aux_classifier"]
 
-    def __init__(self, backbone: nn.Module, classifiers: nn.ModuleList, aux_classifier: Optional[nn.Module] = None) -> None:
+    def __init__(self, backbone: nn.Module, classifiers: nn.ModuleList, aux_classifier: Optional[nn.Module] = None, pred_evac_time: bool = False) -> None:
         super().__init__()
         _log_api_usage_once(self)
         self.backbone = backbone
         self.classifiers = classifiers
         self.aux_classifier = aux_classifier
+        self.pred_evac_time = pred_evac_time
 
     def forward(self, x: Tensor) -> Dict[str, Tensor]:
         input_shape = x.shape[-2:]
@@ -67,7 +69,11 @@ class DeepLabV3MulitHead(nn.Module):
         
         for idx, classifier in enumerate(self.classifiers):
             x_class = classifier(x)
-            x_class = F.interpolate(x_class, size=input_shape, mode="bilinear", align_corners=False)
+            if self.pred_evac_time:
+                if idx != (len(self.classifiers)-1):
+                    x_class = F.interpolate(x_class, size=input_shape, mode="bilinear", align_corners=False)
+            else:
+                x_class = F.interpolate(x_class, size=input_shape, mode="bilinear", align_corners=False)
             result["out"].append(x_class)
 
         # if self.aux_classifier is not None:
@@ -98,6 +104,25 @@ class DeepLabHead(nn.Sequential):
                 nn.ReLU()
             )
 
+class EvacTimeHead(nn.Module):
+    def __init__(self, in_channels: int):
+        super(EvacTimeHead, self).__init__()
+        self.evac_time_predictor = nn.Sequential(
+            DeepLabHead(in_channels, 1, relu_at_end=False),
+            nn.BatchNorm2d(1),
+            nn.MaxPool2d(kernel_size=2),
+            nn.Conv2d(1, 1, 3),
+            nn.BatchNorm2d(1),
+            nn.MaxPool2d(kernel_size=2),
+            nn.Conv2d(1, 1, 5),
+            nn.BatchNorm2d(1),
+            nn.MaxPool2d(kernel_size=2),
+            nn.Flatten(),
+            nn.Linear(100,1)
+            # nn.ReLU(),
+        )
+    def forward(self, x):
+        return self.evac_time_predictor(x)
 
 class ASPPConv(nn.Sequential):
     def __init__(self, in_channels: int, out_channels: int, dilation: int) -> None:
@@ -161,7 +186,8 @@ def _deeplabv3_resnet(
     num_classes: int,
     aux: Optional[bool],
     relu_at_end: bool = False,
-    num_heads: int = 1
+    num_heads: int = 1,
+    pred_evac_time: bool = False
 ) -> DeepLabV3:
     return_layers = {"layer4": "out"}
     if aux:
@@ -169,12 +195,19 @@ def _deeplabv3_resnet(
     backbone = IntermediateLayerGetter(backbone, return_layers=return_layers)
 
     aux_classifier = FCNHead(1024, num_classes) if aux else None
-    if num_heads == 1:
+    if num_heads == 1 and not pred_evac_time:
         classifier = DeepLabHead(2048, num_classes, relu_at_end=relu_at_end)
         return DeepLabV3(backbone, classifier, aux_classifier)
-    else:
+    elif num_heads == 1 and pred_evac_time:
+        classifiers = nn.ModuleList([DeepLabHead(2048, num_classes, relu_at_end=relu_at_end), EvacTimeHead(2048)])
+        return DeepLabV3MulitHead(backbone, classifiers, aux_classifier, pred_evac_time=pred_evac_time)
+    elif num_heads > 1 and not pred_evac_time:
         classifiers = nn.ModuleList([DeepLabHead(2048, num_classes, relu_at_end=relu_at_end) for i in range(num_heads)])
         return DeepLabV3MulitHead(backbone, classifiers, aux_classifier)
+    elif num_heads > 1 and pred_evac_time:
+        classifiers = nn.ModuleList([DeepLabHead(2048, num_classes, relu_at_end=relu_at_end) for i in range(num_heads)])
+        classifiers.append(EvacTimeHead(2048))
+        return DeepLabV3MulitHead(backbone, classifiers, aux_classifier, pred_evac_time=pred_evac_time)
 
 
 def _deeplabv3_mobilenetv3(
@@ -208,6 +241,7 @@ def deeplabv3_resnet50(
     pretrained_backbone: bool = True,
     relu_at_end: bool = False,
     num_heads: int = 1,
+    pred_evac_time: bool = False
 ) -> DeepLabV3:
     """Constructs a DeepLabV3 model with a ResNet-50 backbone.
 
@@ -224,7 +258,7 @@ def deeplabv3_resnet50(
         pretrained_backbone = False
 
     backbone = resnet.resnet50(pretrained=pretrained_backbone, replace_stride_with_dilation=[False, True, True])
-    model = _deeplabv3_resnet(backbone, output_channels, aux_loss, relu_at_end=relu_at_end, num_heads=num_heads)
+    model = _deeplabv3_resnet(backbone, output_channels, aux_loss, relu_at_end=relu_at_end, num_heads=num_heads, pred_evac_time=pred_evac_time)
 
     if pretrained:
         arch = "deeplabv3_resnet50_coco"

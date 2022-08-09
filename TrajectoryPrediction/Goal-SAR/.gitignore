@@ -1,0 +1,34 @@
+# files
+output/
+data/
+*.csv
+*.txt
+*.out
+*.err
+*.pkl
+*.cpkl
+*.gif
+*.zip
+
+# PyTorch
+*.pt
+
+# compiled
+__pycache__/
+.vscode/
+*.pyc
+
+# tensorboard
+runs/
+
+# wandb
+wandb/
+
+# notebooks
+.ipynb_checkpoints
+
+# PyCharm
+.idea
+
+# macOS
+*.DS_Store

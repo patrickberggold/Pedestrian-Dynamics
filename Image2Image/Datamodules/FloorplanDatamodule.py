@@ -17,7 +17,8 @@ class FloorplanDataModule(pl.LightningDataModule):
         max_traj_factor: float = 1.0, 
         num_workers: int = 0, 
         num_ts_per_floorplan: int = 1,
-        vary_area_brightness: bool = False
+        vary_area_brightness: bool = False,
+        pred_evac_times: bool = False
         ):
         super().__init__()
         assert mode in ['grayscale', 'rgb', 'bool', 'segmentation', 'timeAndId', 'grayscale_movie', 'counts'], 'Unknown mode setting!'
@@ -33,6 +34,7 @@ class FloorplanDataModule(pl.LightningDataModule):
         self.non_traj_vals = non_traj_vals
         self.max_traj_factor = max_traj_factor
         self.vary_area_brightness = vary_area_brightness
+        self.pred_evac_times = pred_evac_times
         if self.mode == 'grayscale_movie':
             assert num_ts_per_floorplan > 1 and isinstance(num_ts_per_floorplan, int)
             self.num_ts_per_floorplan = num_ts_per_floorplan
@@ -46,9 +48,9 @@ class FloorplanDataModule(pl.LightningDataModule):
             self.val_dataset = semantic_dataset(split='val', transform=self.transforms)
             self.test_dataset = semantic_dataset(split='test', transform=self.transforms)
         else:
-            self.train_dataset = img2img_dataset_traj_1D(self.mode, self.train_imgs_list, self.train_trajs_list, transform=self.transforms, max_traj_factor=self.max_traj_factor, non_traj_vals=self.non_traj_vals, num_ts_per_floorplan=self.num_ts_per_floorplan, vary_area_brightness=self.vary_area_brightness)
-            self.val_dataset = img2img_dataset_traj_1D(self.mode, self.val_imgs_list, self.val_trajs_list, transform=self.transforms, max_traj_factor=self.max_traj_factor, non_traj_vals=self.non_traj_vals, num_ts_per_floorplan=self.num_ts_per_floorplan, vary_area_brightness=self.vary_area_brightness)
-            self.test_dataset = img2img_dataset_traj_1D(self.mode, self.test_imgs_list, self.test_trajs_list, transform=self.transforms, max_traj_factor=self.max_traj_factor, non_traj_vals=self.non_traj_vals, num_ts_per_floorplan=self.num_ts_per_floorplan, vary_area_brightness=self.vary_area_brightness)
+            self.train_dataset = img2img_dataset_traj_1D(self.mode, self.train_imgs_list, self.train_trajs_list, transform=self.transforms, max_traj_factor=self.max_traj_factor, non_traj_vals=self.non_traj_vals, num_ts_per_floorplan=self.num_ts_per_floorplan, vary_area_brightness=self.vary_area_brightness, pred_evac_times=self.pred_evac_times)
+            self.val_dataset = img2img_dataset_traj_1D(self.mode, self.val_imgs_list, self.val_trajs_list, transform=self.transforms, max_traj_factor=self.max_traj_factor, non_traj_vals=self.non_traj_vals, num_ts_per_floorplan=self.num_ts_per_floorplan, vary_area_brightness=self.vary_area_brightness, pred_evac_times=self.pred_evac_times)
+            self.test_dataset = img2img_dataset_traj_1D(self.mode, self.test_imgs_list, self.test_trajs_list, transform=self.transforms, max_traj_factor=self.max_traj_factor, non_traj_vals=self.non_traj_vals, num_ts_per_floorplan=self.num_ts_per_floorplan, vary_area_brightness=self.vary_area_brightness, pred_evac_times=self.pred_evac_times)
 
     def train_dataloader(self):
         return DataLoader(self.train_dataset, batch_size=self.batch_size, num_workers=self.num_workers)
@@ -84,8 +86,9 @@ class FloorplanDataModule(pl.LightningDataModule):
         if self.mode in ['grayscale', 'grayscale_movie', 'bool']:
             if self.vary_area_brightness:
                 self.traj_path = [SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', f'HDF5_GT_TIMESTAMP_MASKS_resolution_800_800_numAgents_{var}']) for var in [10, 20, 30, 40, 50]]
+                self.traj_path = [SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', f'HDF5_GT_TIMESTAMP_MASKS_resolution_800_800_numAgents_{var}_thickness_5']) for var in [10, 20, 30, 40, 50]]
             else:
-                self.traj_path = [SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'HDF5_GT_TIMESTAMP_MASKS_resolution_800_800'])]
+                self.traj_path = [SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'HDF5_GT_TIMESTAMP_MASKS_resolution_800_800_numAgents_50'])]
         elif self.mode == 'counts':
             self.traj_path = [SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', f'HDF5_GT_TIME_AND_COUNTS_MASKS_resolution_800_800_numAgents_{var}']) for var in [10, 20, 30, 40, 50]]
             self.vary_area_brightness = True # Because False would lead to traj dataset that doesnt exist

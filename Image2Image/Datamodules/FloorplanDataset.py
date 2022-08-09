@@ -104,7 +104,18 @@ class semantic_dataset(Dataset):
         return files_list
 
 class img2img_dataset_traj_1D(Dataset):
-    def __init__(self, mode: str, img_paths: list, traj_paths: list, transform = None, non_traj_vals: float = 0., max_traj_factor: float = 1.0, vary_area_brightness: bool = False, num_ts_per_floorplan: int = 1):
+    def __init__(
+        self, 
+        mode: str, 
+        img_paths: list, 
+        traj_paths: list, 
+        transform = None, 
+        non_traj_vals: float = 0., 
+        max_traj_factor: float = 1.0, 
+        vary_area_brightness: bool = False, 
+        num_ts_per_floorplan: int = 1,
+        pred_evac_times: bool = False
+    ):
 
         self.transform = transform
         self.img_paths = img_paths
@@ -114,6 +125,7 @@ class img2img_dataset_traj_1D(Dataset):
         self.max_traj_factor = max_traj_factor
         self.num_ts_per_floorplan = num_ts_per_floorplan
         self.vary_area_brightness = vary_area_brightness
+        self.pred_evac_times = pred_evac_times
 
         assert mode in ['grayscale', 'rgb', 'bool', 'timeAndId', 'grayscale_movie', 'counts'], 'Unknown mode setting!'
         assert len(self.traj_paths) == len(self.img_paths), 'Length of image paths and trajectory paths do not match, something went wrong!'
@@ -135,7 +147,7 @@ class img2img_dataset_traj_1D(Dataset):
             # bright_limit = 100
             # dark_limit = 155
             # color_interval_length = (dark_limit+bright_limit)//len(agent_variations)
-            agent_variations_index = agent_variations.index(int(traj_path.split(SEP)[-3].split('_')[-1]))
+            agent_variations_index = agent_variations.index(int(traj_path.split(SEP)[-3].split('_')[-3]))
             # reset origin color
             or_color_range = [[255, 100, 100], [255, 50, 50], [255, 0, 0], [205, 0, 0], [155, 0, 0]]
             or_area_color = np.array(or_color_range[agent_variations_index])
@@ -238,5 +250,8 @@ class img2img_dataset_traj_1D(Dataset):
             img = self.transform(img) 
             # TODO transforms for trajs too at some point (e.g. for rotation, resizing):
             # traj = self.transform(traj)
+        
+        if self.pred_evac_times:
+            img = (img, np.random.rand(1))
 
         return img, traj

@@ -12,13 +12,14 @@ class Image2ImageModule(pl.LightningModule):
         self, 
         mode: str, 
         learning_rate: float = 1e-3, 
-        lr_scheduler: str = StepLR.__name__, 
+        lr_scheduler: str = CosineAnnealingLR.__name__, 
         lr_sch_step_size: int = 8, 
         lr_sch_gamma: float = 0.3, 
         two_loss_fcts_param: float = 10., 
         unfreeze_backbone_at_epoch: int = 8,
         relu_at_end: bool = False,
         loss_fct: str = 'mse',
+        pred_evac_time: bool = False,
         num_heads: int = 1
         ):
         super(Image2ImageModule, self).__init__()
@@ -33,6 +34,7 @@ class Image2ImageModule(pl.LightningModule):
         self.unfreeze_backbone_at_epoch = unfreeze_backbone_at_epoch
         self.relu_at_end = relu_at_end
         self.num_heads = 1
+        self.pred_evac_time = pred_evac_time
         assert self.lr_scheduler in [CosineAnnealingLR.__name__, StepLR.__name__, ExponentialLR.__name__, ReduceLROnPlateau.__name__], 'Unknown LR Scheduler!'
         assert loss_fct in ['mse', 'l1_loss', 'crafted'], 'Unknown loss function'
         if loss_fct == 'mse':
@@ -71,7 +73,7 @@ class Image2ImageModule(pl.LightningModule):
         # self.net = ENet(num_classes = self.num_classes)
         # self.net = torchvision.models.segmentation.fcn_resnet50(pretrained = False, progress = True, num_classes = self.num_classes)
 
-        self.net = deeplabv3_resnet50(pretrained = False, progress = True, output_channels = self.output_channels, relu_at_end = self.relu_at_end, num_heads=self.num_heads)
+        self.net = deeplabv3_resnet50(pretrained = False, progress = True, output_channels = self.output_channels, relu_at_end = self.relu_at_end, num_heads=self.num_heads, pred_evac_time=self.pred_evac_time)
 
         # Check intermediate layers and sizes
         # summary(self.net.to('cuda:0'), (3, 800, 800), device='cuda') # IMPORTANT: INCLUDE non-Instance of torch.Tensor exclusion, otherwise exception
@@ -96,8 +98,11 @@ class Image2ImageModule(pl.LightningModule):
     def training_step(self, batch, batch_idx: int):
         # TODO maybe implement scheduler change once backbone is unfreezed
         img, traj = batch
-        img = img.float()
-        traj_pred = self.forward(img)['out']
+        if self.pred_evac_time:
+            img, evac_time = img
+            traj_pred, evac_time_pred = self.forward(img.float())['out'][:-1], self.forward(img.float())['out'][-1]
+        else:
+            traj_pred = self.forward(img.float())['out']
 
         if self.mode == 'bool' or self.mode == 'segmentation':
             # TODO maybe use sparse cross entropy loss to save computation and memory
@@ -115,7 +120,10 @@ class Image2ImageModule(pl.LightningModule):
             lambda_CE2MSE = 1.0 # lambda_CE2MSE = loss_MSE.item()/loss_CE.item()
             train_loss = lambda_CE2MSE * loss_CE + loss_regression
         elif self.mode in ['grayscale', 'rgb', 'counts']:
+            if isinstance(traj_pred, list): traj_pred = traj_pred[0]
             train_loss = self.loss_fct(traj_pred.squeeze(), traj.float())
+            if self.pred_evac_time:
+                train_loss += F.mse_loss(evac_time_pred, evac_time.float())
         elif self.mode == 'grayscale_movie':
             train_loss = sum([self.loss_fct(traj_pred_ts.squeeze(), traj[idx].float()) for idx, traj_pred_ts in enumerate(traj_pred)])
         else:
@@ -127,8 +135,11 @@ class Image2ImageModule(pl.LightningModule):
     def validation_step(self, batch, batch_idx: int) -> None:
 
         img, traj = batch
-        img = img.float()
-        traj_pred = self.forward(img)['out']
+        if self.pred_evac_time:
+            img, evac_time = img
+            traj_pred, evac_time_pred = self.forward(img.float())['out'][:-1], self.forward(img.float())['out'][-1]
+        else:
+            traj_pred = self.forward(img.float())['out']
 
         if self.mode == 'bool' or self.mode == 'segmentation':
             val_loss = F.cross_entropy(traj_pred, traj.long(), ignore_index = 250)
@@ -145,9 +156,13 @@ class Image2ImageModule(pl.LightningModule):
             lambda_CE2MSE = 1.0 # lambda_CE2MSE = loss_MSE.item()/loss_CE.item()
             val_loss = lambda_CE2MSE * loss_CE + loss_regression
         elif self.mode in ['grayscale', 'rgb', 'counts']:
+            if isinstance(traj_pred, list): traj_pred = traj_pred[0]
             val_loss = self.loss_fct(traj_pred.squeeze(), traj.float())
+            if self.pred_evac_time:
+                val_loss += F.mse_loss(evac_time_pred, evac_time.float())
         elif self.mode == 'grayscale_movie':
             val_loss = sum([self.loss_fct(traj_pred_ts.squeeze(), traj[idx].float()) for idx, traj_pred_ts in enumerate(traj_pred)])
+            # TODO implement evac_time prediction
         else:
             raise NotImplementedError('Mode not implemented!')
         
