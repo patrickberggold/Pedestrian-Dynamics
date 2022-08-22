@@ -1,417 +1,324 @@
-import sys
-import ezdxf
-from ezdxf.acc.vector import Vec3
-import argparse
 import os
-import random
-from pdf2xml import convert_pdf_to_xml
-from create_floorplan_images import create_input_images_and_crowdit_projects
+import gzip
+import shutil
+import matplotlib
 import numpy as np
-import itertools
+import cv2
+import matplotlib.pyplot as plt
+from matplotlib import cm
+from matplotlib.colors import ListedColormap, LinearSegmentedColormap
+import h5py
+from skimage.draw import line
+from run_simulations import manipulate_settings, run_simulations
+from tqdm import tqdm
 
-def create_dxf_variation(dxf_filepath, sources_floorplan, destinations_floorplan, var_counter):
-    dxf_variations_dir = os.path.join('\\'.join(dxf_filepath.split('\\')[:-1]), 'dxf_variations')
+CROWDIT_INTERVAL_LENGTH = 0.5
 
-    if not os.path.isdir(dxf_variations_dir):
-        os.mkdir(dxf_variations_dir)
-    
-    try:
-        doc = ezdxf.readfile(dxf_filepath)
-    except IOError:
-        print(f"Not a DXF file or a generic I/O error.")
-        sys.exit(1)
-    except ezdxf.DXFStructureError:
-        print(f"Invalid or corrupted DXF file.")
-        sys.exit(2)
+CREATE_MASKS = True
+CREATE_CSV = True
 
-    doc.layers.add(name="crowdit", color=7, linetype="DASHED")
-    model_space = doc.modelspace()
+# manipulate_settings('C:\\Users\\ga78jem\\Documents\\Crowdit', num_agents=NUM_AGENTS, spawn_endtime=5)
+# run_simulations('C:\\Users\\ga78jem\\Documents\\Crowdit')
 
-    for source in sources_floorplan:
-        (s1, s2), (s3, s4) = source[0], source[1]
-        # "0.9485693795314933,2.974038089426853,4.323054061934929,0.6475300164654794"
-        or_polyline = model_space.add_polyline3d([
-            Vec3(s1, s2, 0.),
-            Vec3(s3, s2, 0.),
-            Vec3(s3, s4, 0.),
-            Vec3(s1, s4, 0.)],
-            close=True,
-            dxfattribs={"layer": "crowdit"}
-        )
-    
-    for destination in destinations_floorplan:
-        (d1, d2), (d3, d4) = destination[0], destination[1]
-        # "16.1,19.3,19.5,15.5"
-        dst_polyline = model_space.add_polyline3d([
-            Vec3(d1, d2, 0.),
-            Vec3(d3, d2, 0.),
-            Vec3(d3, d4, 0.),
-            Vec3(d1, d4, 0.)],
-            close=True,
-            dxfattribs={"layer": "crowdit"}
-        )
+# Input: current point coordinate, min floorplan coord, max floorplan coord, min resolution coord, max resolution coord -> output: projected coordinated
+def linear_interpolation(curr_point_or, lim_min_or, lim_max_or, lim_min_proj, lim_max_proj):
+    return lim_min_proj + (curr_point_or - lim_min_or) * (lim_max_proj - lim_min_proj) / (lim_max_or - lim_min_or)
 
-    # remove unnecessary layers so crowdit works
-    layer_removal_list = [layer.dxf.name for layer in doc.layers if layer.dxf.name=='Defpoints']# layer.dxf.name != 'crowdit' and not layer.dxf.name.startswith('A-WALL')]        
-    for remove_layer in layer_removal_list:
-        doc.layers.remove(remove_layer)
+def get_color_from_colormap(index, max_index):
+    # in style of https://jakevdp.github.io/PythonDataScienceHandbook/04.07-customizing-colorbars.html
+    cmap = plt.cm.get_cmap('jet')
+    start, end = 65, 200
+    # range = np.arange(cmap.N)
+    colors = cmap(np.arange(start, end))
+    assert 0 <= index / max_index <= 1
+    colors = colors[int(index / max_index * (end - start))][:-1]*255
+    # colors = colors[int(index / max_index * cmap.N)][:-1]*255
+    return colors
 
-    store_path = os.path.join(dxf_variations_dir, dxf_filepath.split('\\')[-1].replace('.dxf', f'_variation_{var_counter}.dxf'))
-    doc.saveas(store_path)
+def get_color_from_array(index, max_index, return_in_cv2: bool = False):
 
-def create_ors_dsts_and_export_dxf(dxf_filepath, txt_filepath, layout_setting = 'original', export_dxf: bool = False):
+    # colors = [get_color_from_array(i, 179) for i in range(179)]
+    # [143, 225, 255] -> [0, 187, 255] -> [0, 0, 255] -> [180, 0, 255]
+    r_val_1, g_val_1 = 143, 225
+    r_val_2, g_val_2 = 0, 187
+    r_val_3, g_val_3 = 0, 0
+    r_val_4, g_val_4 = 180, 0
+    b_val = 255 
+    color_range_1_rval = np.arange(143, 0, -1)
+    color_range_2_gval = np.arange(187, 0, -1)
+    color_range_3_rval = np.arange(181)
 
-    # Create Crowdit folder
-    crowdit_folderpath = os.path.join(dxf_filepath.split('Revit')[0], 'Crowdit')
-    if not os.path.isdir(crowdit_folderpath): os.mkdir(crowdit_folderpath)
+    color_range_len = len(color_range_1_rval) + len(color_range_2_gval) + len(color_range_3_rval)
 
-    origin_coords = []
-    destination_coords = []
-    obstacle_coords = []
+    fraction1 = len(color_range_1_rval)/color_range_len # 0.27984344422700586
+    fraction2 = (len(color_range_1_rval) + len(color_range_2_gval))/color_range_len # 0.6457925636007827
 
-    with open(dxf_filepath, 'r') as f_dxf:
-        dxf_lines = f_dxf.readlines()
-        min_id = dxf_lines.index('$EXTMIN\n')
-        max_id = dxf_lines.index('$EXTMAX\n')
-        min_x_dxf = float(dxf_lines[min_id+2])
-        min_y_dxf = float(dxf_lines[min_id+4])
-        max_x_dxf = float(dxf_lines[max_id+2])
-        max_y_dxf = float(dxf_lines[max_id+4])
-    f_dxf.close()
-    sizes = {'x': [min_x_dxf, max_x_dxf], 'y': [min_y_dxf, max_y_dxf]}
-
-    if layout_setting == 'original':
-
-        dxf_variations_dir = os.path.join('\\'.join(dxf_filepath.split('\\')[:-1]), 'dxf_variations')
-
-        if not os.path.isdir(dxf_variations_dir):
-            os.mkdir(dxf_variations_dir)
-
-        rooms = []
-        room = []
-
-        num_origins = 1
-        num_destinations = 1
-
-        z_value_string = dxf_filepath.split('\\')[-1].split('zPos_')[-1].split('_')[0]
-        if z_value_string=='0.0' or z_value_string=='0': 
-            z_wall_there = True
-
-        with open(txt_filepath, 'r') as f:
-            lines = f.readlines()
-            for line in lines:
-                if line.endswith('\n'): line = line.strip().replace('\n', '')
-                if line.startswith('ROOM_'):
-                    if len(room) > 0:
-                        rooms.append(room)
-                        room = []
-                elif line.startswith('COORD_'):
-                    x,y = line.split('COORD_')[-1].split(',')
-                    coord = (float(x), float(y))
-                    room.append(coord)
-            if len(room) > 0:
-                rooms.append(room)
-        f.close()
-
-        # Sort rooms list by room coordinates (first x, then y)
-        sorted_rooms_by_x = sorted(rooms, key=lambda element: (element[0][0], element[0][1]), reverse=False)
-        sorted_rooms_dict = {f'room_{i}': room_coords for i, room_coords in enumerate(sorted_rooms_by_x)}
-        permuted_rooms = [combi for combi in itertools.permutations(sorted_rooms_dict, num_origins+num_destinations)]
-
-        for idx, room_comb in enumerate(permuted_rooms):
-
-            origin_room = sorted_rooms_dict[room_comb[0]]
-            destination_room = sorted_rooms_dict[room_comb[1]]
-
-            #origin_room, destination_room = random.sample(rooms, num_origins + num_destinations)
-            distance_to_borders = 0.5
-            s1 = origin_room[0][0] + distance_to_borders
-            s2 = origin_room[0][1] + distance_to_borders
-            s3 = origin_room[1][0] - distance_to_borders
-            s4 = origin_room[1][1] - distance_to_borders
-            assert s3 > s1+0.5
-            assert s4 > s2+0.5
-
-            d1 = destination_room[0][0] + distance_to_borders
-            d2 = destination_room[0][1] + distance_to_borders
-            d3 = destination_room[1][0] - distance_to_borders
-            d4 = destination_room[1][1] - distance_to_borders
-            assert d3 > d1+0.5
-            assert d4 > d2+0.5
-
-            origin_coords.append([(s1, s2), (s3, s4)])
-            destination_coords.append([(d1, d2), (d3, d4)])
-
-            if export_dxf:
-                create_dxf_variation(dxf_filepath, [(s1, s2), (s3, s4)], [(d1, d2), (d3, d4)], idx)
-
+    fr = index / max_index
+    if fr <= fraction1:
+        r_val = round(r_val_1 - index / (fraction1*max_index) * (r_val_1 - r_val_2))
+        g_val = round(g_val_1 - index / (fraction1*max_index) * (g_val_1 - g_val_2))
+    elif fraction1 < fr <= fraction2:
+        ll = (index-fraction1*max_index) / (fraction2*max_index-fraction1*max_index)
+        r_val = 0
+        g_val = round(g_val_2 - (index-fraction1*max_index) / (fraction2*max_index-fraction1*max_index) * (g_val_2 - g_val_3))
+    elif fraction2 <= fr <= 1:
+        ll = (index-fraction2*max_index) / (max_index-fraction2*max_index)
+        g_val = 0
+        r_val = round(r_val_3 + (index-fraction2*max_index) / (max_index-fraction2*max_index) * (r_val_4 - r_val_3))
     else:
-        with open(txt_filepath, 'r') as f:
-            lines = f.readlines()
+        raise ValueError
 
-            idx_fixed_rooms = [] # areas that are fixed
-            idx_var_rooms = [] # areas that are fixed but not sure how many
-            idx_varset_rooms_left = [] # group of areas of which only one is used for permutations, then iterate over groups
-            idx_varset_rooms_right = [] # group of areas of which only one is used for permutations, then iterate over groups
+    color_array = np.array([r_val, g_val, b_val])
 
-            idx_fixed_obstacles = [] # obstacles that are fixed
-            idx_var_obstacles = [] # obstacles that are fixed but not sure how many
-            idx_varset_obstacles = [] # group of obstacles of which only one is used for permutations, then iterate over groups
-            for i, line in enumerate(lines):
-                if line.startswith('CROWDIT_FIXED'):
-                    idx_fixed_rooms.append((i+1, i+2))
-                elif line.startswith('CROWDIT_VAR_'):
-                    idx_var_rooms.append((i+1, i+2))
-                elif line.startswith('CROWDIT_VARSET_LEFT_'):
-                    idx_varset_rooms_left.append((i+1, i+2))
-                elif line.startswith('CROWDIT_VARSET_RIGHT_'):
-                    idx_varset_rooms_right.append((i+1, i+2))
-                elif line.startswith('OBS_FIXED'):
-                    idx_fixed_obstacles.append((i+1, i+2))
-                elif line.startswith('OBS_VAR_'):
-                    idx_var_obstacles.append((i+1, i+2))
-                elif line.startswith('OBS_VARSET_'):
-                    idx_varset_obstacles.append((i+1, i+2))
-                elif line.startswith('COORD') or line.startswith('\n'):
-                    pass
-                else:
-                    raise NotImplementedError
+    return color_array.astype('float64')
 
-            fixed_rooms = [
-                [
-                    [float(lines[i1].split('COORD_')[-1].split(',')[0]), float(lines[i1].split('COORD_')[-1].split(',')[1])],
-                    [float(lines[i2].split('COORD_')[-1].split(',')[0]), float(lines[i2].split('COORD_')[-1].split(',')[1])]
-                ] for (i1, i2) in idx_fixed_rooms]
-            var_rooms = [
-                [
-                    [float(lines[i1].split('COORD_')[-1].split(',')[0]), float(lines[i1].split('COORD_')[-1].split(',')[1])],
-                    [float(lines[i2].split('COORD_')[-1].split(',')[0]), float(lines[i2].split('COORD_')[-1].split(',')[1])]
-                ] for (i1, i2) in idx_var_rooms]
-            
-            varset_rooms_left = {}
-            for idx, (i1, i2) in enumerate(idx_varset_rooms_left):
-                setting, room_number = lines[i1-1].strip().split('_')[-2:]
-                if not lines[i1].split('COORD_')[-1].startswith('EMPTY'):
-                    room_coords = \
-                        [float(lines[i1].split('COORD_')[-1].split(',')[0]), float(lines[i1].split('COORD_')[-1].split(',')[1])], \
-                        [float(lines[i2].split('COORD_')[-1].split(',')[0]), float(lines[i2].split('COORD_')[-1].split(',')[1])]
-                if setting not in varset_rooms_left:
-                    varset_rooms_left.update({setting: [(int(room_number), room_coords)]})
-                else:
-                    varset_rooms_left[setting].append((int(room_number), room_coords))
+def get_color_from_pedId(id, num_agents = 40):
+    id = int(id)
+    if id < 5:
+        color = np.array([138, 255, 0])
+    elif 5 <= id < 10:
+        color = np.array([0, 255, 171])
+    elif 10 <= id < 15:
+        color = np.array([0, 255, 255])
+    elif 15 <= id < 20:
+        color = np.array([0, 160, 255])
+    elif 20 <= id < 25:
+        color = np.array([0, 57, 255])
+    elif 25 <= id < 30:
+        color = np.array([109, 0, 255])
+    elif 30 <= id < 35:
+        color = np.array([185, 0, 255])
+    elif 35 <= id <= 40:
+        color = np.array([255, 0, 213])
+    else:
+        raise NotImplementedError
 
-            varset_rooms_right = {}
-            for idx, (i1, i2) in enumerate(idx_varset_rooms_right):
-                setting, room_number = lines[i1-1].strip().split('_')[-2:]
-                if not lines[i1].split('COORD_')[-1].startswith('EMPTY'):
-                    room_coords = \
-                        [float(lines[i1].split('COORD_')[-1].split(',')[0]), float(lines[i1].split('COORD_')[-1].split(',')[1])], \
-                        [float(lines[i2].split('COORD_')[-1].split(',')[0]), float(lines[i2].split('COORD_')[-1].split(',')[1])]
-                if setting not in varset_rooms_right:
-                    varset_rooms_right.update({setting: [(int(room_number), room_coords)]})
-                else:
-                    varset_rooms_right[setting].append((int(room_number), room_coords))
+    return color.astype('float64')
 
-            fixed_obstacles = [
-                [
-                    [float(lines[i1].split('COORD_')[-1].split(',')[0]), float(lines[i1].split('COORD_')[-1].split(',')[1])],
-                    [float(lines[i2].split('COORD_')[-1].split(',')[0]), float(lines[i2].split('COORD_')[-1].split(',')[1])]
-                ] for (i1, i2) in idx_fixed_obstacles]
+def get_customized_colormap():
 
-            var_obstacles = [[float(lines[i].split('COORD_')[-1].split(',')[0]), float(lines[i].split('COORD_')[-1].split(',')[1])] for i in idx_var_obstacles]
-            varset_obstacles = [[float(lines[i].split('COORD_')[-1].split(',')[0]), float(lines[i].split('COORD_')[-1].split(',')[1])] for i in idx_varset_obstacles]
+    start = 65
+    end = 200
+    jet = cm.get_cmap('jet', end-start)
+    custom_colors = jet(np.linspace(0, 1, end-start))*255
+    # define colors
+    # for idx in range(start, end):
+    #     custom_colors[idx] = class_names[key]
+    customed_colormap = ListedColormap(custom_colors)
+    return customed_colormap
 
-            if len(var_rooms) > 0: assert len(varset_rooms_left) == 0 and len(varset_rooms_right) == 0
-            if len(varset_rooms_left) > 0 and len(varset_rooms_right) > 0: assert len(var_rooms) == 0
+BASE_PATH = "C:\\Users\\ga78jem\\Documents\\"
 
-        f.close()
+FLOORPLANS_GT_PATH = os.path.join(BASE_PATH, "Revit\\ADVANCED_FLOORPLANS")
+CROWDIT_PATH = os.path.join(BASE_PATH, "Crowdit\\ADVANCED_EXPERIMENTS")
+
+HDF5_ROOT_FOLDER = 'C:\\Users\\ga78jem\\Documents\\Revit\\DATASET_IMGs_1_SRC__1_DST\\HDF5_INPUT_IMAGES_resolution_800_800'
+REVIT_ROOT_FOLDER = 'C:\\Users\\ga78jem\\Documents\\Revit\\Exports'
+
+HDF5_TRAJ_MASK_PATH = os.path.join(BASE_PATH, "Revit\\ADVANCED_FLOORPLANS\\HDF5_GT_TIMESTAMP_MASKS_thickness_5")
+if not os.path.isdir(HDF5_TRAJ_MASK_PATH): os.mkdir(HDF5_TRAJ_MASK_PATH)
+
+CSV_SIMULATION_PATH = os.path.join(BASE_PATH, "Revit\\ADVANCED_FLOORPLANS\\CSV_GT_TRAJECTORIES")
+if not os.path.isdir(CSV_SIMULATION_PATH): os.mkdir(CSV_SIMULATION_PATH)
+
+for layout_type in os.listdir(FLOORPLANS_GT_PATH):
+    if layout_type != 'train_station':
+        continue
+    layout_folder = os.path.join(FLOORPLANS_GT_PATH, layout_type)
+    # Create new target head folder for the layout type in traj mask folder
+    if not os.path.isdir(os.path.join(HDF5_TRAJ_MASK_PATH, layout_type)): os.mkdir(os.path.join(HDF5_TRAJ_MASK_PATH, layout_type))
+
+    # Create new target head folder for the layout type in csv folder
+    if not os.path.isdir(os.path.join(CSV_SIMULATION_PATH, layout_type)): os.mkdir(os.path.join(CSV_SIMULATION_PATH, layout_type))
+
+    for floorplan_folder in os.listdir(layout_folder):
+
+        # Create new target folder for each floorplan in traj mask folder
+        if not os.path.isdir(os.path.join(HDF5_TRAJ_MASK_PATH, layout_type, floorplan_folder)): os.mkdir(os.path.join(HDF5_TRAJ_MASK_PATH, layout_type, floorplan_folder))
         
-        if len(var_rooms) > 0:
-            var_rooms_permuted = []
-            for i in range(1, len(var_rooms)+1):
-                var_rooms_permuted += list(itertools.combinations(var_rooms, i))
-        else:
-            var_rooms_permuted_left, var_rooms_permuted_right = [], []
-            for setting in varset_rooms_left:
-                room_list = [el[1] for el in varset_rooms_left[setting]]
-                var_rooms_permuted_left.append(room_list)
-            
-            for setting in varset_rooms_right:
-                room_list = [el[1] for el in varset_rooms_right[setting]]
-                var_rooms_permuted_right.append(room_list)
-
-
-        fixed_rooms_combinations = []
-        for i in range(1, len(fixed_rooms)+1):
-            fixed_rooms_combinations += list(itertools.combinations(fixed_rooms, i))
-
-        # Select only those combinations that shall be included in the dataset
-        if layout_setting in ['corr_e2e', 'corr_cross']:
-            if layout_setting=='corr_e2e':
-                var_rooms_permuted = [var_rooms_comb for var_rooms_comb in var_rooms_permuted if len(var_rooms_comb) <= 2]
-                fixed_rooms_combinations = [fixed_rooms_comb for fixed_rooms_comb in fixed_rooms_combinations if len(fixed_rooms_comb) <= 2]
-            elif layout_setting == 'corr_cross':
-                var_rooms_permuted = [var_rooms_comb for var_rooms_comb in var_rooms_permuted if len(var_rooms_comb) == 2]
-                fixed_rooms_combinations = [fixed_rooms_comb for fixed_rooms_comb in fixed_rooms_combinations if len(fixed_rooms_comb) == 2]
-            fixed_rooms_combinations.reverse()
-            var_rooms_permuted.reverse()
-            permuted_rooms = list(itertools.product(fixed_rooms_combinations, var_rooms_permuted))
-            permuted_rooms += list(itertools.product(var_rooms_permuted, fixed_rooms_combinations))
-
-        elif layout_setting=='train_station':
-            # Possible settings:
-            # option 1) one track side -> escalators
-            # option 2) one track side -> escalators + other tracks side
-            # option 3) escalators -> one track side
-            # option 4) escalators -> both track sides
-            # At least two escalators because if only one, a queue might be generated which the simulator struggles to immitate realistically, maybe even artefacts are generated (simulator gets stuck) 
-
-            # fix at least two escalators
-            escalators = []
-            for rooms_comb in fixed_rooms_combinations:
-                valid_comb = []
-                if len(rooms_comb) > 1:
-                    for room in rooms_comb:
-                        valid_comb.append((room[0], room[1]))
-                    escalators.append(valid_comb)
-            # escalators = [(rooms[0], rooms[1]) for rooms in fixed_rooms_combinations if len(rooms) >= 2]
-            
-            assert len(escalators) > 0
-
-            # option 1 one track side -> escalators
-            permuted_rooms = list(itertools.product(var_rooms_permuted_left, escalators))
-            permuted_rooms += list(itertools.product(var_rooms_permuted_right, escalators))
-
-            # option 2 one track side -> escalators + other tracks side
-            left_track_esc = [
-                room_esc_comb[0]+room_esc_comb[1] for room_esc_comb in list(itertools.product(var_rooms_permuted_left, escalators))
-                ]
-            right_track_esc = [
-                room_esc_comb[0]+room_esc_comb[1] for room_esc_comb in list(itertools.product(var_rooms_permuted_right, escalators))
-                ]
-
-            permuted_rooms += list(itertools.product(var_rooms_permuted_left, right_track_esc))
-            permuted_rooms += list(itertools.product(var_rooms_permuted_right, left_track_esc))
-
-            # option 3 escalators -> one track side (exclude no spawn/dst area combinations)
-            permuted_rooms += list(itertools.product(escalators, var_rooms_permuted_right))
-            permuted_rooms += list(itertools.product(escalators, [right_comb for right_comb in var_rooms_permuted_right if len(right_comb[0])>0]))
-
-            # option 4) escalators -> both track sides (exclude no spawn/dst area combinations)
-            both_tracks = list(itertools.product(
-                [left_comb for left_comb in var_rooms_permuted_left if len(left_comb[0]) > 0], 
-                [right_comb for right_comb in var_rooms_permuted_right if len(right_comb[0]) > 0]
-                ))
-            both_tracks = [both_comb[0]+both_comb[1] for both_comb in both_tracks]
-            permuted_rooms += list(itertools.product(escalators, both_tracks))
-
-        if len(permuted_rooms) > 1000:
-            indices = list(range(len(permuted_rooms)))
-            random.seed(20)
-            random.shuffle(indices)
-            permuted_rooms = [permuted_rooms[i] for i in indices[:1000]]
-
-        # Draw origin and destination areas
-        for idx, room_comb in enumerate(permuted_rooms):
-
-            origin_areas = room_comb[0]
-            destination_areas = room_comb[1]
-
-            #origin_room, destination_room = random.sample(rooms, num_origins + num_destinations
-            combin_or = []
-            for origin in origin_areas:
-                s1 = origin[0][0]
-                s2 = origin[0][1]
-                s3 = origin[1][0]
-                s4 = origin[1][1]
-                x_min, x_max = min(s1, s3), max(s1, s3)
-                y_min, y_max = min(s2, s4), max(s2, s4)
-                assert x_max > x_min+0.5
-                assert y_max > y_min+0.5
-                area = (x_max-x_min)*(y_max-y_min) # rectangle area for now
-                combin_or.append([(x_min, y_min), (x_max, y_max), area])
-
-            combin_dst = []
-            for destination in destination_areas:
-                d1 = destination[0][0]
-                d2 = destination[0][1]
-                d3 = destination[1][0]
-                d4 = destination[1][1]
-                x_min, x_max = min(d1, d3), max(d1, d3)
-                y_min, y_max = min(d2, d4), max(d2, d4)
-                assert x_max > x_min+0.5
-                assert y_max > y_min+0.5
-                area = (x_max-x_min)*(y_max-y_min) # rectangle area for now
-                combin_dst.append([(x_min, y_min), (x_max, y_max), area])
-            
-            origin_coords.append(combin_or)                
-            destination_coords.append(combin_dst)
-
-            if export_dxf:
-                create_dxf_variation(dxf_filepath, combin_or, combin_dst, idx)
-
-        # Draw obstacle areas
-        for obstacle in fixed_obstacles:
-            o1 = obstacle[0][0]
-            o2 = obstacle[0][1]
-            o3 = obstacle[1][0]
-            o4 = obstacle[1][1]
-            x_min, x_max = min(o1, o3), max(o1, o3)
-            y_min, y_max = min(o2, o4), max(o2, o4)
-            obstacle_coords.append([(x_min, y_min), (x_max, y_max)])
+        # Create new target folder for each floorplan in csv folder
+        if not os.path.isdir(os.path.join(CSV_SIMULATION_PATH, layout_type, floorplan_folder)): os.mkdir(os.path.join(CSV_SIMULATION_PATH, layout_type, floorplan_folder))
         
+        print(f'Drawing trajectories (RGB and float masks) into {layout_type}, {floorplan_folder}...')
 
-    return origin_coords, destination_coords, obstacle_coords, sizes
+        # determine min & max values in original coordinate system (which is dxf)
+        dxf_filepath = os.path.join(BASE_PATH, 'Revit\\Exports_ADVANCED', layout_type, floorplan_folder, floorplan_folder.split("__")[-1]+'.dxf')
+        with open(dxf_filepath, 'r') as f_dxf:
+            dxf_lines = f_dxf.readlines()
+            min_id = dxf_lines.index('$EXTMIN\n')
+            max_id = dxf_lines.index('$EXTMAX\n')
+            min_x_dxf = float(dxf_lines[min_id+2])
+            min_y_dxf = float(dxf_lines[min_id+4])
+            max_x_dxf = float(dxf_lines[max_id+2])
+            max_y_dxf = float(dxf_lines[max_id+4])
+        f_dxf.close()
+        sizes = {'x': [min_x_dxf, max_x_dxf], 'y': [min_y_dxf, max_y_dxf]}
 
-class_names = {
-    # get color values from https://doc.instantreality.org/tools/color_calculator/
-    # Format RGBA
-    'unpassable': np.array([0, 0, 0, 1]), 
-    'walkable area': np.array([1, 1, 1, 1]), 
-    'spawn_zone': np.array([0.501, 0.039, 0, 1]), #np.array([1, 0.0, 0, 1]) 
-    'destination': np.array([0.082, 0.847, 0.054, 1]), # np.array([0.0, 1, 0, 1]), 
-    # 'path': np.array([0, 0, 1, 1])
-    # start: [91, 235, 251] -> [91, 96, 251]
-    }
+        max_time_per_flooplan = 0.
 
-REVIT_PATH = "C:\\Users\\ga78jem\\Documents\\Revit\\Exports_ADVANCED\\"
-ONLY_DO = 'train_station'
+        for variation_image in tqdm(os.listdir(os.path.join(layout_folder, floorplan_folder))):
 
-for id_b, building_folder in enumerate(os.listdir(REVIT_PATH)):
+            # Create new target folder for each src-dst variation in traj mask folder
+            target_variation_folder_mask = os.path.join(HDF5_TRAJ_MASK_PATH, layout_type, floorplan_folder, f'variation_{variation_image.split("_")[-1].replace(".h5", "")}')
+            if not os.path.isdir(target_variation_folder_mask) and CREATE_MASKS: os.mkdir(target_variation_folder_mask)
+            
+            # Create new target folder for each src-dst variation in csv folder
+            target_variation_folder_csv = os.path.join(CSV_SIMULATION_PATH, layout_type, floorplan_folder, f'variation_{variation_image.split("_")[-1].replace(".h5", "")}')
+            if not os.path.isdir(target_variation_folder_csv) and CREATE_CSV: os.mkdir(target_variation_folder_csv)
+            
+            filename = os.path.join(layout_folder, floorplan_folder, variation_image)
+            img = np.array(h5py.File(filename, 'r').get('img'))
+            # plt.imshow(img)
 
-    print(f'\n\n###############################################')
-    print(f'BUILDING FOLDER [{id_b+1}/{len(os.listdir(REVIT_PATH))}]')
-    print(f'###############################################\n\n')
+            resolutions = img.shape[:2] # [800, 800]
+            resolution_height, resolution_width  = resolutions[0], resolutions[1]
 
-    building_folder_abs = os.path.join(REVIT_PATH, building_folder)
+            trajectory_mask = np.zeros((resolution_height, resolution_width))
 
-    for id_s, setting_dir in enumerate(os.listdir(building_folder_abs)):
+            trajectory2timestamp = {}
 
-        print(f'\n\nSTEP [{id_s+1}/{len(os.listdir(building_folder_abs))}]\n\n')
+            endstrings = ['\n\r', '\r\n', '\r', '\n']
+            csv_trajectory_folder = os.path.join(CROWDIT_PATH, layout_type, floorplan_folder.replace('floorplan_', ''), 'variation_'+variation_image.split('_')[-1].replace('.h5', ''))
+            for num_agent_folder in os.listdir(csv_trajectory_folder):
 
-        filepath = os.path.join(building_folder_abs, setting_dir)
+                # Create new target folder for each src-dst variation in traj mask folder
+                target_filepath_mask = os.path.join(target_variation_folder_mask, f'variation_{variation_image.split("_")[-1].replace(".h5", "")}_num_agents_{num_agent_folder.split("_")[-1]}.h5')
+                
+                # Create new target folder for each src-dst variation in csv folder
+                target_filepath_csv = os.path.join(target_variation_folder_csv, f'variation_{variation_image.split("_")[-1].replace(".h5", "")}_num_agents_{num_agent_folder.split("_")[-1]}.txt')
+            
+                project_folder = 'project_'+floorplan_folder.split('__')[0]+'_'+variation_image.split('_')[-1].replace('.h5', '')+'_res'
+                csv_location_path = os.path.join(csv_trajectory_folder, num_agent_folder, project_folder, \
+                    'out', f'floor-floorplan_variation_{variation_image.split("_")[-1].replace(".h5", "")}_agents_{num_agent_folder.split("_")[-1]}.csv.gz')#+ \
+                        # floorplan_folder.split('__')[-1]+'_variation_'+variation_image.split('_')[-1].replace('.h5', '')+'.csv.gz')
+                assert os.path.isfile(csv_location_path), f'csv path {csv_location_path} does not exist!'
 
-        txt_filepath = os.path.join(filepath, setting_dir.split('__')[-1]+'.txt')
-        dxf_filepath = os.path.join(filepath, setting_dir.split('__')[-1]+'.dxf')
-        pdf_filepath = os.path.join(filepath, setting_dir.split('__')[-1]+'.pdf')
+                # Extract gzip file
+                with gzip.open(csv_location_path, 'r') as f_in:
+                    # decode lines
+                    lines = [line.decode("utf-8").split(',') for line in f_in.readlines()]
+                    f_in.close()
 
-        txt_true = os.path.isfile(txt_filepath)
-        pdf_true = os.path.isfile(pdf_filepath)
-        dxf_true = os.path.isfile(dxf_filepath)
+                if CREATE_CSV:
+                    with open(target_filepath_csv, 'w') as f:
+                        for line_el in lines[1:]:
+                            line_el[-1] = line_el[-1].split('\r')[0]
+                            line_string = ','.join(line_el)+'\n'
+                            f.write(line_string)
 
-        xml_path = convert_pdf_to_xml(pdf_filepath)
+                pedestrian_trajs = [
+                    [
+                        float(line[0]), # typecast time
+                        int(line[1]), # typecast pedId
+                        round(linear_interpolation(float(line[2]), min_x_dxf, max_x_dxf, 0, resolution_width)), # typecast x and project it to image resolution
+                        resolution_height - round(linear_interpolation(float(line[3]), min_y_dxf, max_y_dxf, 0, resolution_height)) # typecast y and project it to image resolution, also adjust origin offset in cv2
+                    ] for line in lines[1:]]
 
-        setting = 'original'
-        if building_folder_abs.split('\\')[-1] != ONLY_DO:
-            continue
-        else:
-            setting = ONLY_DO
-        # if building_folder_abs.split('\\')[-1] == 'corr_e2e':  continue #setting = 'corr_e2e'
-        # elif building_folder_abs.split('\\')[-1] == 'corr_cross': setting = 'corr_cross'
-        # elif building_folder_abs.split('\\')[-1] == 'train_station': continue #setting = 'train_station'
-        # else:
-            # raise NotImplementedError
+                # first sort after id, then after timestamp
+                # pedestrian_trajs.sort(key=lambda x: (x[1], x[0]))
+                pedestrian_trajs.sort(key=lambda x: (x[0], x[1]))
 
-        origins, destinations, obstacles, resolutions = create_ors_dsts_and_export_dxf(dxf_filepath, txt_filepath, layout_setting=setting)
+                max_timestamp_per_variation = max([ped[0] for ped in pedestrian_trajs])
+                if max_timestamp_per_variation > max_time_per_flooplan:
+                    max_time_per_flooplan = max_timestamp_per_variation
 
-        create_input_images_and_crowdit_projects(xml_path, building_folder_abs, origins, destinations, obstacles, class_names, resolutions, setting=setting)
+                pedestrians_by_id = {}
+                for ped in pedestrian_trajs:
+                    if ped[1]+1 in pedestrians_by_id:
+                        pedestrians_by_id[ped[1]+1].append([ped[0], ped[2], ped[3]])
+                    else:
+                        pedestrians_by_id.update({ped[1]+1: [[ped[0], ped[2], ped[3]]]})
+
+                for pedId in pedestrians_by_id:
+                    for i in range(1, len(pedestrians_by_id[pedId])):
+                        x_start, y_start = pedestrians_by_id[pedId][i-1][1], pedestrians_by_id[pedId][i-1][2]
+                        x_end, y_end = pedestrians_by_id[pedId][i][1], pedestrians_by_id[pedId][i][2]
+                        
+                        # Create lines in RGB image
+                        # color = colors_by_timestamp[pedestrians_by_id[pedId][i][0]]
+                        # cv2.line(img, (x_start, y_start), (x_end, y_end), (color), thickness=1) # cv2 origin: upper left
+                        def linemaker(p_start, p_end, thickness=1):
+                            x_start, x_end, y_start, y_end = p_start[0], p_end[0], p_start[1], p_end[1]
+                            
+                            x_diff, y_diff = x_end - x_start, y_end -y_start
+                            m = y_diff / x_diff if x_diff != 0 else 10.
+
+                            lines = []
+                            or_line = [coord for coord in zip(*line(*(p_start[0], p_start[1]), *(p_end[0], p_end[1])))]
+                            lines += [[coord] for coord in zip(*line(*(p_start[0], p_start[1]), *(p_end[0], p_end[1])))]
+
+                            line_factors = []
+                            for i in range(thickness-1):
+                                sign = 1
+                                if i%2 != 0:
+                                    sign = -1
+                                i = int(i/2.)+1
+                                # th=2: +1, th=3: [+1,-1], th=4: [+1,-1,+2]
+                                line_factors.append(sign*i)
+
+                            for factor in line_factors:
+
+                                if abs(m) > 1:
+                                    extra_line = list(zip(*line(*(p_start[0]+factor, p_start[1]), *(p_end[0]+factor, p_end[1]))))
+                                    # extra_line = list(zip(*_line_profile_coordinates((x_start+1, y_start), (x_end+1, y_end), linewidth=1)))
+                                else:
+                                    extra_line = list(zip(*line(*(p_start[0], p_start[1]+factor), *(p_end[0], p_end[1]+factor))))
+                                    # extra_line = list(zip(*_line_profile_coordinates((x_start, y_start+1), (x_end, y_end+1), linewidth=1)))
+                                # lines += extra_line
+                                for idx in range(len(lines)):
+                                    lines[idx].append(extra_line[idx])
+
+                                # check if all points are offsetted correctly
+                                for c_line_or, c_line_ex in zip(or_line, extra_line):
+                                    if sum(c_line_ex) != sum(c_line_or)+factor:
+                                        hi = 1
+
+                            return lines
+                        
+                        # Create trajectory-timestamped image mask
+                        time_start, time_end = pedestrians_by_id[pedId][i-1][0], pedestrians_by_id[pedId][i][0]
+
+                        coord_lines = linemaker((x_start, y_start), (x_end, y_end), thickness=5)
+                        
+                        timestamp_line = [linear_interpolation(i, 0, len(coord_lines), time_start, time_end) for i in range(len(coord_lines))]
+
+                        for (coords, timestamp) in zip(coord_lines, timestamp_line):
+                            for coord in coords:
+                                if coord not in trajectory2timestamp:
+                                    # update only timestamp
+                                    trajectory2timestamp.update({coord: (timestamp, 1.)})
+                                else:
+                                    current_ts_avg = trajectory2timestamp[coord][0]
+                                    current_ts_counter = trajectory2timestamp[coord][1]
+                                    trajectory2timestamp[coord] = (
+                                        current_ts_avg + timestamp/(current_ts_counter + 1.) - current_ts_avg/(current_ts_counter + 1.),
+                                        current_ts_counter + 1
+                                    )
+                                    # new_ts_avg = trajectory2timestamp[coord][0]
+                                    # new_ts_counter = trajectory2timestamp[coord][1]
+
+
+                trajectory_coord_list = np.array(list(trajectory2timestamp.keys()))
+                # Assign times to coordinates inside mask
+                trajectory_mask[trajectory_coord_list[:,1], trajectory_coord_list[:,0]] = np.array(list(trajectory2timestamp.values()))[:,0]
+
+                # plt.imshow(trajectory_mask)
+
+                # traj = trajectory_mask
+                # non_zeros = np.argwhere(traj > 0)
+                # for coord in non_zeros:
+                #     # id = traj[coord[0], coord[1]]
+                #     # color = get_color_from_pedId(id)
+                #     ts = traj[coord[0], coord[1]]
+                #     color = get_color_from_array(ts, MAX_TIME)
+                #     img[coord[0], coord[1]] = color
+                # plt.imshow(img, vmin=0, vmax=255)
+
+                if CREATE_MASKS:
+                    # Store trajectory masks images as HDF5
+                    hf_mk = h5py.File(target_filepath_mask, 'w')
+                    hf_mk.create_dataset('img', data=trajectory_mask)
+                    hf_mk.create_dataset('max_time', data=max_timestamp_per_variation)
+                    hf_mk.close()
+
+        print(f'max time in {layout_type}, {floorplan_folder}: {max_time_per_flooplan:.3f}')

@@ -61,7 +61,7 @@ model_name=args.name
 args.dataset_folder = os.path.join(file_dir, args.dataset_folder)
 
 if do_floorplans:
-    args.dataset_folder = 'C:\\Users\\Remotey\\Documents\\Datasets\CSV_SIMULATION_DATA_numAgents_50'
+    args.dataset_folder = 'C:\\Users\\Remotey\\Documents\\Datasets\\SIMPLE_FLOORPLANS\\CSV_SIMULATION_DATA_numAgents_50'
     args.dataset_name = '0__floorplan_zPos_0.0_roomWidth_0.24_numRleft_2.0_numRright_2.0'
     model_name = args.name = 'floorplans_0'
     args.delim = ','
@@ -156,7 +156,7 @@ scipy.io.savemat(os.path.join(file_dir, 'models', 'Individual', f'{args.name}', 
 
 if inference:
 
-    model_path = os.path.join('TrajectoryPrediction\\Trajectory-Transformer\\models\\Individual', args.name)
+    model_path = os.path.join('TrajectoryPrediction\\TF4TrajectoryForecasting\\models\\Individual', args.name)
     pth_filename = sorted([filename for filename in os.listdir(model_path) if filename.endswith('.pth')], key=lambda x: int(x.replace('.pth', '')))[-1]
     model.load_state_dict(torch.load(os.path.join(model_path, pth_filename)))
 
@@ -188,7 +188,7 @@ if inference:
 
         for i in range(args.preds):
             trg_att = subsequent_mask(dec_inp.shape[1]).repeat(dec_inp.shape[0], 1, 1).to(device)
-            out = model(inp, dec_inp, src_att, trg_att)
+            out = model(inp, dec_inp, src_att, trg_att) # MODEL INPUT: (100, 7, 2), (100, 1, 3), (100, 1, 7) -> ones mask, (100, 1, 1) -> true mask # OUT: (100, 1, 3)
             dec_inp=torch.cat((dec_inp,out[:,-1:,:]),1)
 
         preds_tr_b=(dec_inp[:,1:,0:2]*std.to(device)+mean.to(device)).detach().cpu().numpy().cumsum(1)+batch['src'][:,-1:,0:2].cpu().numpy()

@@ -1,0 +1,376 @@
+Each .csv file contains the following data by row:
+
+FrameID
+TrackID
+X coord
+Y coord
+Agent's class
+
+The mapping between numbers and object classes is as follows:
+car=0, truck_bus=1, pedestrian=2, bicycle=3, default=4.
+
+In the following, the statistics of each scene are reported.
+
+Scene 00
+Number of frames: 2403.
+Tracks length (time-steps on average) 53.4583.
+Class 0, n. 12831, avg_len = 43.3480.
+Class 1, n. 945, avg_len = 33.7500.
+Class 2, n. 5646, avg_len = 194.6897.
+Class 3, n. 1106, avg_len = 35.6774.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 01
+Number of frames: 2581.
+Tracks length (time-steps on average) 50.1922.
+Class 0, n. 15790, avg_len = 49.6541.
+Class 1, n. 1110, avg_len = 30.0000.
+Class 2, n. 2011, avg_len = 105.8421.
+Class 3, n. 413, avg_len = 37.5455.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 02
+Number of frames: 2264.
+Tracks length (time-steps on average) 63.2015.
+Class 0, n. 17154, avg_len = 57.3712.
+Class 1, n. 1490, avg_len = 35.4762.
+Class 2, n. 5577, avg_len = 154.9167.
+Class 3, n. 554, avg_len = 36.9333.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 03
+Number of frames: 2568.
+Tracks length (time-steps on average) 56.0822.
+Class 0, n. 13610, avg_len = 55.7787.
+Class 1, n. 1041, avg_len = 34.7000.
+Class 2, n. 2065, avg_len = 89.7826.
+Class 3, n. 333, avg_len = 47.5714.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 04
+Number of frames: 1620.
+Tracks length (time-steps on average) 53.9945.
+Class 0, n. 8425, avg_len = 52.0062.
+Class 1, n. 516, avg_len = 34.4000.
+Class 2, n. 863, avg_len = 215.7500.
+Class 3, n. 23, avg_len = 23.0000.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 05
+Number of frames: 2353.
+Tracks length (time-steps on average) 51.8622.
+Class 0, n. 13267, avg_len = 51.2239.
+Class 1, n. 719, avg_len = 25.6786.
+Class 2, n. 1820, avg_len = 121.3333.
+Class 3, n. 375, avg_len = 37.5000.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 06
+Number of frames: 2741.
+Tracks length (time-steps on average) 52.6907.
+Class 0, n. 14367, avg_len = 48.3737.
+Class 1, n. 1232, avg_len = 28.6512.
+Class 2, n. 4348, avg_len = 117.5135.
+Class 3, n. 497, avg_len = 45.1818.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 07
+Number of frames: 2639.
+Tracks length (time-steps on average) 95.0566.
+Class 0, n. 15810, avg_len = 112.9286.
+Class 1, n. 198, avg_len = 19.8000.
+Class 2, n. 3498, avg_len = 81.3488.
+Class 3, n. 646, avg_len = 34.0000.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 08
+Number of frames: 2664.
+Tracks length (time-steps on average) 62.7759.
+Class 0, n. 16587, avg_len = 59.0285.
+Class 1, n. 56, avg_len = 18.6667.
+Class 2, n. 7839, avg_len = 90.1034.
+Class 3, n. 1570, avg_len = 35.6818.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 09
+Number of frames: 1960.
+Tracks length (time-steps on average) 64.4661.
+Class 0, n. 11221, avg_len = 67.5964.
+Class 1, n. 28, avg_len = 14.0000.
+Class 2, n. 3002, avg_len = 81.1351.
+Class 3, n. 963, avg_len = 31.0645.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 10
+Number of frames: 2136.
+Tracks length (time-steps on average) 71.4111.
+Class 0, n. 14254, avg_len = 77.0486.
+Class 1, n. 77, avg_len = 15.4000.
+Class 2, n. 2973, avg_len = 74.3250.
+Class 3, n. 763, avg_len = 33.1739.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 11
+Number of frames: 2254.
+Tracks length (time-steps on average) 66.4557.
+Class 0, n. 14829, avg_len = 70.6143.
+Class 1, n. 49, avg_len = 12.2500.
+Class 2, n. 4529, avg_len = 73.0484.
+Class 3, n. 862, avg_len = 29.7241.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 12
+Number of frames: 2818.
+Tracks length (time-steps on average) 69.2659.
+Class 0, n. 18773, avg_len = 71.6527.
+Class 1, n. 122, avg_len = 20.3333.
+Class 2, n. 7784, avg_len = 85.5385.
+Class 3, n. 1720, avg_len = 33.7255.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 13
+Number of frames: 2487.
+Tracks length (time-steps on average) 77.4594.
+Class 0, n. 18349, avg_len = 81.1903.
+Class 1, n. 1506, avg_len = 301.2000.
+Class 2, n. 6391, avg_len = 79.8875.
+Class 3, n. 1407, avg_len = 30.5870.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 14
+Number of frames: 2513.
+Tracks length (time-steps on average) 61.1135.
+Class 0, n. 13909, avg_len = 62.6532.
+Class 1, n. 77, avg_len = 19.2500.
+Class 2, n. 7334, avg_len = 73.3400.
+Class 3, n. 1842, avg_len = 34.7547.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 15
+Number of frames: 2708.
+Tracks length (time-steps on average) 73.8464.
+Class 0, n. 18895, avg_len = 85.1126.
+Class 1, n. 123, avg_len = 15.3750.
+Class 2, n. 5104, avg_len = 76.1791.
+Class 3, n. 1355, avg_len = 28.2292.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [array([10.])].
+
+Scene 16
+Number of frames: 3003.
+Tracks length (time-steps on average) 78.2578.
+Class 0, n. 23349, avg_len = 84.9055.
+Class 1, n. 70, avg_len = 14.0000.
+Class 2, n. 9952, avg_len = 83.6303.
+Class 3, n. 1845, avg_len = 36.1765.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 17
+Number of frames: 2627.
+Tracks length (time-steps on average) 86.7473.
+Class 0, n. 24394, avg_len = 95.6627.
+Class 1, n. 150, avg_len = 21.4286.
+Class 2, n. 6842, avg_len = 91.2267.
+Class 3, n. 1231, avg_len = 31.5641.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 18
+Number of frames: 2800.
+Tracks length (time-steps on average) 146.6628.
+Class 0, n. 46815, avg_len = 258.6464.
+Class 2, n. 11988, avg_len = 77.8442.
+Class 3, n. 3822, avg_len = 41.5435.
+Class 1 not present.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 19
+Number of frames: 2484.
+Tracks length (time-steps on average) 133.0081.
+Class 0, n. 36894, avg_len = 244.3311.
+Class 1, n. 123, avg_len = 24.6000.
+Class 2, n. 8520, avg_len = 69.8361.
+Class 3, n. 3676, avg_len = 39.9565.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 20
+Number of frames: 3255.
+Tracks length (time-steps on average) 127.2445.
+Class 0, n. 47872, avg_len = 227.9619.
+Class 2, n. 10958, avg_len = 70.6968.
+Class 3, n. 4665, avg_len = 34.8134.
+Class 1 not present.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 21
+Number of frames: 3111.
+Tracks length (time-steps on average) 144.7545.
+Class 0, n. 60174, avg_len = 277.2995.
+Class 1, n. 43, avg_len = 43.0000.
+Class 2, n. 13743, avg_len = 73.4920.
+Class 3, n. 5655, avg_len = 39.0000.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 22
+Number of frames: 3080.
+Tracks length (time-steps on average) 134.1601.
+Class 0, n. 55193, avg_len = 253.1789.
+Class 2, n. 14099, avg_len = 77.4670.
+Class 3, n. 6106, avg_len = 37.6914.
+Class 1 not present.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 23
+Number of frames: 3160.
+Tracks length (time-steps on average) 136.1304.
+Class 0, n. 57715, avg_len = 282.9167.
+Class 1, n. 28, avg_len = 28.0000.
+Class 2, n. 13684, avg_len = 72.4021.
+Class 3, n. 6848, avg_len = 37.8343.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 24
+Number of frames: 2388.
+Tracks length (time-steps on average) 137.3475.
+Class 0, n. 41566, avg_len = 282.7619.
+Class 2, n. 11763, avg_len = 80.0204.
+Class 3, n. 4769, avg_len = 36.9690.
+Class 1 not present.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 25
+Number of frames: 3120.
+Tracks length (time-steps on average) 124.7792.
+Class 0, n. 46847, avg_len = 211.0225.
+Class 1, n. 113, avg_len = 22.6000.
+Class 2, n. 15645, avg_len = 81.0622.
+Class 3, n. 4651, avg_len = 39.0840.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 26
+Number of frames: 3249.
+Tracks length (time-steps on average) 161.8483.
+Class 0, n. 67498, avg_len = 292.1991.
+Class 1, n. 42, avg_len = 42.0000.
+Class 2, n. 14893, avg_len = 93.0812.
+Class 3, n. 6098, avg_len = 39.3419.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 27
+Number of frames: 3321.
+Tracks length (time-steps on average) 178.3316.
+Class 0, n. 79687, avg_len = 396.4527.
+Class 1, n. 70, avg_len = 35.0000.
+Class 2, n. 19211, avg_len = 86.9276.
+Class 3, n. 6961, avg_len = 40.9471.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 28
+Number of frames: 3174.
+Tracks length (time-steps on average) 175.3228.
+Class 0, n. 72574, avg_len = 345.5905.
+Class 1, n. 37, avg_len = 37.0000.
+Class 2, n. 14363, avg_len = 86.5241.
+Class 3, n. 6999, avg_len = 44.0189.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 29
+Number of frames: 3249.
+Tracks length (time-steps on average) 170.6444.
+Class 0, n. 78989, avg_len = 346.4430.
+Class 2, n. 18702, avg_len = 83.8655.
+Class 3, n. 6914, avg_len = 42.6790.
+Class 1 not present.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 30
+Number of frames: 2562.
+Tracks length (time-steps on average) 69.8929.
+Class 0, n. 26714, avg_len = 72.5924.
+Class 1, n. 257, avg_len = 19.7692.
+Class 2, n. 1395, avg_len = 87.1875.
+Class 3, n. 360, avg_len = 25.7143.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 31
+Number of frames: 2565.
+Tracks length (time-steps on average) 72.4165.
+Class 0, n. 27263, avg_len = 77.0141.
+Class 1, n. 497, avg_len = 21.6087.
+Class 2, n. 983, avg_len = 70.2143.
+Class 3, n. 296, avg_len = 29.6000.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+
+Scene 32
+Number of frames: 2534.
+Tracks length (time-steps on average) 69.8801.
+Class 0, n. 30097, avg_len = 72.5229.
+Class 1, n. 628, avg_len = 27.3043.
+Class 2, n. 1273, avg_len = 90.9286.
+Class 3, n. 636, avg_len = 42.4000.
+Class 4 not present.
+
+Difference(s) between two consecutive frames: [10.].
+

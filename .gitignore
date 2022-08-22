@@ -8,4 +8,6 @@ log.txt
 *.png
 Image2Image/Optimization/*
 *.pth
+*.pt
 *.mat
+*.pkl

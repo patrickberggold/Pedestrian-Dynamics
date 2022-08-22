@@ -1,0 +1,1 @@
+epoch,learning_rate,train_ADE,train_FDE,valid_ADE,valid_FDE,goal_BCE_loss,traj_MSE_loss

@@ -28,8 +28,8 @@ class data_generator(object):
             seq_train, seq_val, seq_test = get_ethucy_split(parser.dataset)
             self.init_frame = 0
         elif parser.dataset == 'floorplan_simple':
-            data_root = 'C:\\Users\\Remotey\\Documents\\Datasets\\CSV_SIMULATION_DATA_numAgents_50'
-            img_root = 'C:\\Users\\Remotey\\Documents\\Datasets\\HDF5_INPUT_IMAGES_resolution_800_800'
+            data_root = 'C:\\Users\\Remotey\\Documents\\Datasets\\SIMPLE_FLOORPLANS\\CSV_SIMULATION_DATA_numAgents_50'
+            img_root = 'C:\\Users\\Remotey\\Documents\\Datasets\\SIMPLE_FLOORPLANS\\HDF5_INPUT_IMAGES_resolution_800_800'
             [seq_train, seq_val, seq_test], [img_train, img_val, img_test] = get_flooplan_simple_split(data_root, img_root)
             self.init_frame = 0
         else:
