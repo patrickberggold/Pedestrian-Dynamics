@@ -85,30 +85,53 @@ class DeepLabV3MulitHead(nn.Module):
         return result
 
 class DeepLabHead(nn.Sequential):
-    def __init__(self, in_channels: int, num_classes: int, relu_at_end: bool = False) -> None:
+    def __init__(self, in_channels: int, num_classes: int, relu_at_end: bool = False, dropout = None) -> None:
         if not relu_at_end:
-            super().__init__(
-                ASPP(in_channels, [12, 24, 36]),
-                nn.Conv2d(256, 256, 3, padding=1, bias=False),
-                nn.BatchNorm2d(256),
-                nn.ReLU(),
-                nn.Conv2d(256, num_classes, 1),
-            )
+            if not dropout:
+                super().__init__(
+                    ASPP(in_channels, [12, 24, 36]),
+                    nn.Conv2d(256, 256, 3, padding=1, bias=False),
+                    nn.BatchNorm2d(256),
+                    nn.ReLU(),
+                    nn.Conv2d(256, num_classes, 1),
+                )
+            else:
+                super().__init__(
+                    ASPP(in_channels, [12, 24, 36]),
+                    nn.Dropout(p=dropout),
+                    nn.Conv2d(256, 256, 3, padding=1, bias=False),
+                    nn.BatchNorm2d(256),
+                    nn.ReLU(),
+                    nn.Dropout(p=dropout),
+                    nn.Conv2d(256, num_classes, 1),
+                )
         else:
-            super().__init__(
-                ASPP(in_channels, [12, 24, 36]),
-                nn.Conv2d(256, 256, 3, padding=1, bias=False),
-                nn.BatchNorm2d(256),
-                nn.ReLU(),
-                nn.Conv2d(256, num_classes, 1),
-                nn.ReLU()
-            )
+            if not dropout:
+                super().__init__(
+                    ASPP(in_channels, [12, 24, 36]),
+                    nn.Conv2d(256, 256, 3, padding=1, bias=False),
+                    nn.BatchNorm2d(256),
+                    nn.ReLU(),
+                    nn.Conv2d(256, num_classes, 1),
+                    nn.ReLU()
+                )
+            else:
+                super().__init__(
+                    ASPP(in_channels, [12, 24, 36]),
+                    nn.Dropout(p=dropout),
+                    nn.Conv2d(256, 256, 3, padding=1, bias=False),
+                    nn.BatchNorm2d(256),
+                    nn.ReLU(),
+                    nn.Dropout(p=dropout),
+                    nn.Conv2d(256, num_classes, 1),
+                    nn.ReLU()
+                )
 
 class EvacTimeHead(nn.Module):
-    def __init__(self, in_channels: int):
+    def __init__(self, in_channels: int, dropout: bool = False):
         super(EvacTimeHead, self).__init__()
         self.evac_time_predictor = nn.Sequential(
-            DeepLabHead(in_channels, 1, relu_at_end=False),
+            DeepLabHead(in_channels, 1, relu_at_end=False, dropout=dropout),
             nn.BatchNorm2d(1),
             nn.MaxPool2d(kernel_size=2),
             nn.Conv2d(1, 1, 3),
@@ -123,6 +146,23 @@ class EvacTimeHead(nn.Module):
         )
     def forward(self, x):
         return self.evac_time_predictor(x)
+
+
+class IntermediateLayerGetter_custom(IntermediateLayerGetter):
+    def __init__(self, model: nn.Module, return_layers: Dict[str, str], dropout=None) -> None:
+        self.dropout = dropout
+        super().__init__(model, return_layers)
+    def forward(self, x):
+        out = OrderedDict()
+        for name, module in self.items():
+            x = module(x)
+            if name in self.return_layers:
+                out_name = self.return_layers[name]
+                out[out_name] = x
+        if self.dropout:
+            x = nn.Dropout(p=self.dropout)(x)
+        return out
+
 
 class ASPPConv(nn.Sequential):
     def __init__(self, in_channels: int, out_channels: int, dilation: int) -> None:

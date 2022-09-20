@@ -10,25 +10,29 @@ from helper import SEP
 import json
 from collections import OrderedDict
  
-ROOT_PATH = SEP.join(['Image2Image', 'Optimization'])
-OPTIMIZATION_NAME = 'grayscale_thickness_5_gammaStep_5_plusCosAnn_RedPlat_contFromTrain'
-FOLDER_NAME = os.path.join(ROOT_PATH, OPTIMIZATION_NAME)
-if not os.path.isdir(FOLDER_NAME): os.mkdir(FOLDER_NAME)
-
-MODEL_FILENAME = 'model_optuna_grayscale_thickness_5_gammaStep_5.ckpt'
-LOG_FILENAME = os.path.join(FOLDER_NAME, 'log.txt')
-# TODO implement visual TF as backbone
 def hyperparameter_optimization(
     mode: str, 
     datamodule: pl.LightningDataModule, 
     n_trials: int, 
     epochs_per_trial: int, 
-    cuda_device: int = 0, 
-    limit_train_batches = None, 
-    limit_val_batches = None
+    folder_name: str,
+    cuda_device: int = 0,
+    test_run: bool = True,
     ):
 
-    assert mode in ['grayscale', 'rgb', 'bool', 'segmentation', 'timeAndId', 'grayscale_movie'], 'Unknown mode setting!'
+    if test_run: n_trials = 2
+    if test_run: epochs_per_trial = 2
+    limit_train_batches = 2 if test_run else None
+    limit_val_batches = 2 if test_run else None
+
+    assert mode in ['grayscale', 'grayscale_movie', 'evac'], 'Unknown mode setting!'
+    
+    ROOT_PATH = SEP.join(['Image2Image', 'Optimization'])
+    folder_path = os.path.join(ROOT_PATH, folder_name)
+    if not os.path.isdir(folder_path): os.mkdir(folder_path)
+
+    MODEL_FILENAME = 'best_model.ckpt'
+    LOG_FILENAME = os.path.join(folder_path, 'log.txt')
 
     log_file = open(LOG_FILENAME, "w")
     log_file.close()
@@ -36,25 +40,26 @@ def hyperparameter_optimization(
     def objective(trial: optuna.trial.Trial) -> float:
 
         # Hyperparameters to be optimized
-        learning_rate = trial.suggest_float("lr", 5e-4, 1e-2)
-        lr_scheduler = trial.suggest_categorical("sch", ['CosineAnnealingLR', 'StepLR', 'ReduceLROnPlateau'])
-        # lr_sch_step_size = trial.suggest_int("step_size", 4, 12)
-        lr_sch_gamma = trial.suggest_float("gamma", 0.3, 0.6)
-        # non_traj_vals = trial.suggest_float("ntv", -7., -0.5)
-        # unfreeze_backbone_epoch = trial.suggest_categorical
-        # max_traj_val = trial.suggest_float("mtv", )
+        learning_rate = trial.suggest_float("lr", 8e-5, 8e-4)
+        lr_scheduler = trial.suggest_categorical("sch", ['ReduceLROnPlateau', 'ExponentialLR'])
+        dropout = trial.suggest_float("dropout", 0.02, 0.45)
+        # opt = trial.suggest_categorical("opt", ['Adam', 'AdamW'])
+        gamma = trial.suggest_float('gamma', 0.1, 0.3)
+        # batch_size = trial.suggest_categorical("batch_size", [4, 8])
+        # weight_decay = trial.suggest_categorical("weight_decay", [0.0, 1e-6, 1e-5, 1e-4, 1e-3])
 
-        # CKPT_PATH = SEP.join(['Image2Image', 'checkpoints', 'checkpoints_DeepLab4Img2Img', 'model_grayscale_lineThickness5_CosAnn_Step5_Lr122_Gam42_epoch=36-step=5772.ckpt'])
-        # state_dict = OrderedDict([(key.replace('net.', ''), tensor) if key.startswith('net.') else (key, tensor) for key, tensor in torch.load(CKPT_PATH)['state_dict'].items()])
-        module = Image2ImageModule(mode=mode, learning_rate=learning_rate, lr_scheduler=lr_scheduler, lr_sch_step_size=5,lr_sch_gamma=lr_sch_gamma, relu_at_end = True, num_heads=8)
-        # module.net.load_state_dict(state_dict)
+        # datamodule.set_batch_size(batch_size)
 
-        # datamodule = FloorplanDataModule(mode = mode, cuda_index = cuda_device, batch_size = 4, num_ts_per_floorplan=8, vary_area_brightness=False)
+        module = Image2ImageModule(mode=mode, unfreeze_backbone_at_epoch=None, lr_scheduler=lr_scheduler, learning_rate=learning_rate, alternate_unfreezing=True, lr_sch_gamma=gamma, weight_decay=1e-6, p_dropout=dropout)
 
-        datamodule.set_non_traj_vals(new_val = 0.)
+        # Load from checkpoint
+        CKPT_PATH = SEP.join(['Image2Image', 'checkpoints', 'checkpoints_DeepLab4Img2Img', 'trained_img_and_evac.ckpt'])
+        state_dict = OrderedDict([(key.replace('net.', ''), tensor) if key.startswith('net.') else (key, tensor) for key, tensor in torch.load(CKPT_PATH).items()])
+
+        module.load_state_dict(OrderedDict((k_module, v_loaded) for (k_loaded, v_loaded), (k_module, v_module) in zip(state_dict.items(), module.state_dict().items())))
 
         # TODO implement feedback when trials are pruned
-        hyperparameters = dict(lr=learning_rate, gamma=lr_sch_gamma, sch=lr_scheduler)
+        hyperparameters = dict(lr=learning_rate, sch=lr_scheduler, gamma=gamma, dropout=dropout)
 
         start_trial_string = f'\n#################################################################################################################' + \
             f'\nSTARTING NEW TRIAL {trial.number+1}/{n_trials} WITH {epochs_per_trial} EPOCHS PER TRIAL with:\n'
@@ -86,7 +91,7 @@ def hyperparameter_optimization(
         log_file.write(finish_trial_string)
         log_file.close()
 
-        trial.set_user_attr(key="model_state_dict", value = module.net.state_dict())
+        trial.set_user_attr(key="model_state_dict", value = module.state_dict())
 
         return trainer.callback_metrics["val_loss"].item()
 
@@ -109,12 +114,12 @@ def hyperparameter_optimization(
             
             # Save hyperparameters in json format
             jsonString = json.dumps(json_hyperparams)
-            jsonFile = open(os.path.join(FOLDER_NAME, 'hyperparameters_'+MODEL_FILENAME.replace('.ckpt', '.json')), 'w')
+            jsonFile = open(os.path.join(folder_path, 'hyperparameters_'+MODEL_FILENAME.replace('.ckpt', '.json')), 'w')
             jsonFile.write(jsonString)
             jsonFile.close()
             
             # Save best model in ckpt format
-            torch.save(trial.user_attrs['model_state_dict'], os.path.join(FOLDER_NAME, MODEL_FILENAME))
+            torch.save(trial.user_attrs['model_state_dict'], os.path.join(folder_path, MODEL_FILENAME))
 
     pruner = optuna.pruners.MedianPruner()
     study = optuna.create_study(direction="minimize", pruner=pruner)
@@ -145,7 +150,7 @@ def hyperparameter_optimization(
             log_file.write(string_5)
 
     fig = optuna.visualization.plot_slice(study, params=[key for key in best_trial.user_attrs if key != 'model_state_dict'])
-    fig.write_image(os.path.join(FOLDER_NAME, 'params.png'))
+    fig.write_image(os.path.join(folder_path, 'params.png'))
 
     string_6 = '\nHyperparameter importances:'
     print(string_6)
