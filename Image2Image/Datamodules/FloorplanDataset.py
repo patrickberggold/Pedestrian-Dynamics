@@ -20,7 +20,7 @@ class Dataset_Img2Img(Dataset):
         vary_area_brightness: bool = True, 
         num_ts_per_floorplan: int = 1,
     ):
-
+        # TODO maybe turn off transformations when eval/test
         self.transform = transform
         self.img_paths = img_paths
         self.traj_paths = traj_paths
@@ -103,6 +103,9 @@ class Dataset_Img2Img(Dataset):
         
         if self.pred_evac_times:
             img = (img, evac_time)
+        
+        if self.transform:
+            img = self.transform(img)
 
         return img, traj
 

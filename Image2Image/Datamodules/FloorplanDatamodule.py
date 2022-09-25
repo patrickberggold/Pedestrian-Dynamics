@@ -1,6 +1,6 @@
 import torch
 import pytorch_lightning as pl
-from torchvision import transforms
+from torchvision.transforms import Compose, RandomResizedCrop, RandomHorizontalFlip, Normalize, Resize, CenterCrop
 from torch.utils.data import DataLoader
 import os, random
 from .FloorplanDataset import Dataset_Img2Img
@@ -9,7 +9,8 @@ from helper import SEP
 class FloorplanDataModule(pl.LightningDataModule):
     def __init__(
         self, 
-        mode: str, 
+        mode: str,
+        arch: str, 
         cuda_index: int, 
         batch_size: int = 4, 
         splits: list = [0.7, 0.15, 0.15], 
@@ -19,13 +20,34 @@ class FloorplanDataModule(pl.LightningDataModule):
         ):
         super().__init__()
         assert mode in ['grayscale', 'grayscale_movie', 'evac'], 'Unknown mode setting!'
+        assert arch in ['DeepLab', 'BeIT', 'SegFormer']
         self.mode = mode
         self.batch_size = batch_size
-        self.transforms = transforms.Compose([
-            transforms.ToTensor(), # THIS NORMALIZES ALREADY
-            # transforms.Normalize(mean = [0.35675976, 0.37380189, 0.3764753], std = [0.32064945, 0.32098866, 0.32325324])
-            # transforms.Normalize(mean=0, std=255)
-        ])
+
+        if arch in ['BeIT', 'SegFormer']:
+            if arch == 'BeIT':
+                from transformers import BeitFeatureExtractor
+                feature_extractor = BeitFeatureExtractor.from_pretrained('microsoft/beit-base-finetuned-ade-640-640')
+            elif arch == 'SegFormer':
+                from transformers import SegformerFeatureExtractor
+                feature_extractor = SegformerFeatureExtractor.from_pretrained('nvidia/segformer-b0-finetuned-cityscapes-768-768')            
+            self.train_transforms = Compose([
+                Resize(feature_extractor.size),
+                # RandomResizedCrop(feature_extractor.size),
+                # RandomHorizontalFlip(),
+                # ToTensor(),
+                Normalize(mean=feature_extractor.image_mean, std=feature_extractor.image_std),
+            ])
+            self.val_transforms = Compose([
+                Resize(feature_extractor.size),
+                # CenterCrop(feature_extractor.size),
+                # ToTensor(),
+                Normalize(mean=feature_extractor.image_mean, std=feature_extractor.image_std),
+            ])
+        else:
+            self.train_transforms = None
+            self.val_transforms = None
+
         self.cuda_index = cuda_index
         self.num_workers = num_workers
         self.vary_area_brightness = vary_area_brightness
@@ -37,9 +59,9 @@ class FloorplanDataModule(pl.LightningDataModule):
         self.set_data_paths(splits)
 
     def setup(self, stage):
-        self.train_dataset = Dataset_Img2Img(self.mode, self.train_imgs_list, self.train_trajs_list, transform=self.transforms, num_ts_per_floorplan=self.num_ts_per_floorplan, vary_area_brightness=self.vary_area_brightness)
-        self.val_dataset = Dataset_Img2Img(self.mode, self.val_imgs_list, self.val_trajs_list, transform=self.transforms, num_ts_per_floorplan=self.num_ts_per_floorplan, vary_area_brightness=self.vary_area_brightness)
-        self.test_dataset = Dataset_Img2Img(self.mode, self.test_imgs_list, self.test_trajs_list, transform=self.transforms, num_ts_per_floorplan=self.num_ts_per_floorplan, vary_area_brightness=self.vary_area_brightness)
+        self.train_dataset = Dataset_Img2Img(self.mode, self.train_imgs_list, self.train_trajs_list, transform=self.train_transforms, num_ts_per_floorplan=self.num_ts_per_floorplan, vary_area_brightness=self.vary_area_brightness)
+        self.val_dataset = Dataset_Img2Img(self.mode, self.val_imgs_list, self.val_trajs_list, transform=self.val_transforms, num_ts_per_floorplan=self.num_ts_per_floorplan, vary_area_brightness=self.vary_area_brightness)
+        self.test_dataset = Dataset_Img2Img(self.mode, self.test_imgs_list, self.test_trajs_list, transform=self.val_transforms, num_ts_per_floorplan=self.num_ts_per_floorplan, vary_area_brightness=self.vary_area_brightness)
 
     def train_dataloader(self):
         return DataLoader(self.train_dataset, batch_size=self.batch_size, num_workers=self.num_workers)
@@ -108,14 +130,14 @@ class FloorplanDataModule(pl.LightningDataModule):
         self.test_trajs_list = [self.traj_list[idx] for idx in self.indices[:test_split_index]]
 
         # LIMIT THE DATASET
-        self.train_imgs_list = self.train_imgs_list[:1000]
-        self.train_trajs_list = self.train_trajs_list[:1000]
+        # self.train_imgs_list = self.train_imgs_list[:1000]
+        # self.train_trajs_list = self.train_trajs_list[:1000]
 
-        self.val_imgs_list = self.val_imgs_list[:200]
-        self.val_trajs_list = self.val_trajs_list[:200]
+        # self.val_imgs_list = self.val_imgs_list[:200]
+        # self.val_trajs_list = self.val_trajs_list[:200]
 
-        self.test_imgs_list = self.test_imgs_list[:200]
-        self.test_trajs_list = self.test_trajs_list[:200]
+        # self.test_imgs_list = self.test_imgs_list[:200]
+        # self.test_trajs_list = self.test_trajs_list[:200]
 
     def set_filepaths(self):
 

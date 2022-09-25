@@ -14,38 +14,41 @@ from helper import get_color_from_array, SEP, load_img2img_into_state_dict
 from hyperparameter_optim import hyperparameter_optimization
 import imageio
 
-CUDA_DEVICE = 0 # 0, 1 or 'cpu'
-MODE = 'evac' # implemented: grayscale, grayscale_movie, evac
-BATCH_SIZE = 8
+CUDA_DEVICE = 1 # 0, 1 or 'cpu'
+MODE = 'grayscale' # implemented: grayscale, grayscale_movie, evac
+BATCH_SIZE = 4
 NUM_HEADS = 8
 PRED_EVAC_TIME = True
+ARCH = 'BeIT' # DeepLab, BeIT, SegFormer
 
-do_training = True
+do_training = False
 do_hyperparameter_optim = False
 
 if __name__ == '__main__':
 
-    datamodule = FloorplanDataModule(mode = MODE, cuda_index = CUDA_DEVICE, num_workers=2, batch_size = BATCH_SIZE, num_ts_per_floorplan=NUM_HEADS, vary_area_brightness=True)
+    datamodule = FloorplanDataModule(mode = MODE, arch=ARCH, cuda_index = CUDA_DEVICE, num_workers=2, batch_size = BATCH_SIZE, num_ts_per_floorplan=NUM_HEADS, vary_area_brightness=True)
 
     if do_hyperparameter_optim:
 
-        best_trial = hyperparameter_optimization(mode = MODE, datamodule=datamodule, n_trials = 100, epochs_per_trial = 6, folder_name='test_optim', cuda_device = CUDA_DEVICE, test_run = True)
+        best_trial = hyperparameter_optimization(mode = MODE, datamodule=datamodule, n_trials = 100, epochs_per_trial = 6, folder_name='img2img_finetune_2', cuda_device = CUDA_DEVICE, test_run = False)
 
         if not do_training:
             quit()
 
     if do_training:
-        model = Image2ImageModule(mode=MODE, unfreeze_backbone_at_epoch=None, learning_rate=0.0003411290749340907, lr_sch_step_size=100, lr_scheduler='ReduceLROnPlateau', alternate_unfreezing=True, num_heads=NUM_HEADS)
+        # TODO add last conv layer(s)
+        module = Image2ImageModule(mode=MODE, arch=ARCH, unfreeze_backbone_at_epoch=None, learning_rate=0.0007, lr_sch_gamma=0.24946288393411667, lr_sch_step_size=100, lr_scheduler='ReduceLROnPlateau', alternate_unfreezing=True, num_heads=NUM_HEADS)
+        # module.model.append_conv_layers()
 
         # Load from checkpoint
-        # CKPT_PATH = SEP.join(['Image2Image', 'checkpoints', 'checkpoints_DeepLab4Img2Img', 'trained_img_and_evac.ckpt'])
-        # state_dict = OrderedDict([(key.replace('net.', ''), tensor) if key.startswith('net.') else (key, tensor) for key, tensor in torch.load(CKPT_PATH).items()])
-
-        # model.load_state_dict(OrderedDict((k_module, v_loaded) for (k_loaded, v_loaded), (k_module, v_module) in zip(state_dict.items(), model.state_dict().items())))
+        # trained_together_OPTIM_TWICE_2_1000dataset_epoch=16-step=2125.ckpt
+        CKPT_PATH = SEP.join(['Image2Image', 'checkpoints', 'checkpoints_DeepLab4Img2Img', 'beit_whole_ds_epoch=11-step=25428.ckpt'])
+        state_dict = OrderedDict([(key.replace('net.', ''), tensor) if key.startswith('net.') else (key, tensor) for key, tensor in torch.load(CKPT_PATH)['state_dict'].items()])
+        module.model.load_state_dict(OrderedDict((k_module, v_loaded) for (k_loaded, v_loaded), (k_module, v_module) in zip(state_dict.items(), module.model.state_dict().items())))
 
         model_checkpoint = ModelCheckpoint(
             dirpath = SEP.join(['Image2Image','checkpoints', 'checkpoints_DeepLab4Img2Img']),
-            filename = 'trained_together_OPTIM_1000dataset_{epoch}-{step}',
+            filename = 'beit_whole_ds_finetuned_{epoch}-{step}',
             save_top_k = 1,
             verbose = True, 
             monitor = 'val_loss',
@@ -64,24 +67,25 @@ if __name__ == '__main__':
             )
 
         start_training_time = time.time()
-        trainer.fit(model, datamodule=datamodule)
+        trainer.fit(module, datamodule=datamodule)
         # automatically restores model, epoch, step, LR schedulers, apex, etc...
         # IMPORTANT: this will delete the old checkpoint!!
         # trainer.fit(model, datamodule=datamodule, ckpt_path="Image2Image\checkpoints\checkpoints_DeepLab4Img2Img\model_grayscale_lineThickness5_CosAnn_Step5_Lr122_Gam42_epoch=36-step=5772.ckpt")
-        print(f'Training took {(time.time() - start_training_time)/60./(model.current_epoch+1):.3f} minutes per epoch...')
+        print(f'Training took {(time.time() - start_training_time)/60./(module.current_epoch+1):.3f} minutes per epoch...')
 
         quit()
 
     # Load stored model: keys in state_dict need to be adjusted
-    # CKPT_PATH = SEP.join(['Image2Image', 'checkpoints', 'checkpoints_DeepLab4Img2Img', 'trained_together_OPTIM_1000dataset_epoch=2-step=375.ckpt'])
-    CKPT_PATH = SEP.join(['Image2Image', 'Optimization', 'evac_finetune_overfit', 'evac_train_together.ckpt'])
+    CKPT_PATH = SEP.join(['Image2Image', 'checkpoints', 'checkpoints_DeepLab4Img2Img', 'beit_whole_ds_finetuned_epoch=23-step=50856.ckpt'])
+    # CKPT_PATH = SEP.join(['Image2Image', 'Optimization', 'evac_finetune_overfit', 'trained_together_OPTIM_TWICE_2_1000dataset_epoch=16-step=2125.ckpt'])
     # model_grayscale_scale_RELUatEnd_BBunfreezeAt8_epoch=51-step=8112
     # model_grayscale_lineThickness5_PRETRAINED_5datasets_CosAnn_Step5_Lr122_Gam42_epoch=15-step=12432
     # model_grayscalemovie_lineThickness5_PRETRAINED_5datasets_CosAnn_Step5_Lr122_Gam42_epoch=16-step=13209
     # new_model_only_img2img_ALT_FREEZE_epoch=51-step=110188.ckpt
-    state_dict = OrderedDict([(key.replace('net.', ''), tensor) if key.startswith('net.') else (key, tensor) for key, tensor in torch.load(CKPT_PATH).items()])
+    # trained_together_OPTIM_TWICE_2_1000dataset_epoch=16-step=2125.ckpt
+    state_dict = OrderedDict([(key.replace('net.', ''), tensor) if key.startswith('net.') else (key, tensor) for key, tensor in torch.load(CKPT_PATH)['state_dict'].items()])
 
-    model = Image2ImageModule(mode=MODE, num_heads=NUM_HEADS)
+    model = Image2ImageModule(mode=MODE, arch=ARCH, num_heads=NUM_HEADS)
     model.load_state_dict(OrderedDict((k_module, v_loaded) for (k_loaded, v_loaded), (k_module, v_module) in zip(state_dict.items(), model.state_dict().items())))
 
     # This only works when there are no required positional arguments that need to passed to the constructor
@@ -104,7 +108,7 @@ if __name__ == '__main__':
             MODE = 'grayscale'
         else:
             img = batch[0].float().to(f'cuda:{CUDA_DEVICE}')
-            traj_pred = model.forward(img)['out']
+            traj_pred = model.forward(img)#['out']
         traj = batch[1]
 
         if MODE == 'grayscale_movie':
@@ -120,17 +124,28 @@ if __name__ == '__main__':
             if MODE == 'grayscale':
                 traj_pred_np = traj_pred[i].transpose(0,1).transpose(1, 2).cpu().detach().numpy()
                 # Get GT floorplan RGB
-                img_gt = img[i].transpose(0,1).transpose(1, 2).detach().cpu().numpy()#*255
+                if ARCH != 'DeepLab': 
+                    img_gt = transforms.Resize((800, 800))(img[i])
+                    img_gt = img_gt.transpose(0,1).transpose(1, 2).detach().cpu().numpy()
+                    img_gt = (img_gt+1)/2.
+                else:
+                    img_gt = img[i].transpose(0,1).transpose(1, 2).detach().cpu().numpy()#*255
+                traj_max_timestamp = torch.max(traj[i]).item()
+                traj_pred_max_timestamp = torch.max(traj_pred[i]).item()
                 # Draw predicted trajectories into floorplan
                 traj_pred_np = traj_pred_np.squeeze()#*89.5 # Multiply by MAX_TIME
                 traj_pred_bigger_thresh = np.argwhere(traj_pred_np >= 1.0)
-                pred_colors_from_timestamps = [get_color_from_array(traj_pred_np[x, y], 80.)/255. for x, y in traj_pred_bigger_thresh]
+                pred_colors_from_timestamps = [get_color_from_array(traj_pred_np[x, y], traj_max_timestamp)/255. for x, y in traj_pred_bigger_thresh]
                 traj_pred_img = img_gt.copy()
+                # for i, (x, y) in enumerate(zip(traj_pred_bigger_thresh[:,0], traj_pred_bigger_thresh[:,1])):
+                #     color = np.array(pred_colors_from_timestamps[i])
+                #     traj_pred_img[x, y] = color
+
                 if len(pred_colors_from_timestamps) > 0: traj_pred_img[traj_pred_bigger_thresh[:,0], traj_pred_bigger_thresh[:,1]] = np.array(pred_colors_from_timestamps)
 
                 # Draw GT trajectories into floorplan
                 traj_np = traj[i].detach().cpu().numpy()
-                gt_colors_from_timestamps = [get_color_from_array(traj_np[x, y], 80.)/255. for x, y in np.argwhere(traj_np >= 1.0)]
+                gt_colors_from_timestamps = [get_color_from_array(traj_np[x, y], traj_max_timestamp)/255. for x, y in np.argwhere(traj_np >= 1.0)]
                 img_gt[np.argwhere(traj_np>= 1.0)[:,0], np.argwhere(traj_np >= 1.0)[:,1]] = np.array(gt_colors_from_timestamps)
 
                 plt.imshow(img_gt)

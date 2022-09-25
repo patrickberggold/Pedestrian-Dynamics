@@ -6,13 +6,15 @@ import pytorch_lightning as pl
 from torchsummary import summary
 from models import deeplabv3_resnet50
 # from torchvision.models.segmentation.deeplabv3 import deeplabv3_resnet50
-from torchvision.models import resnet
-from models.deeplabv3_resnet50_custom import DeepLabHead, DeepLabV3MulitHead, DeepLabV3, EvacTimeHead, IntermediateLayerGetter_custom
+from .deeplab_traj_pred import DeepLabTraj
+from .beit_traj_pred import BeITTraj
+from .segformer_traj_pred import SegFormerTraj
 
 class Image2ImageModule(pl.LightningModule):
     def __init__(
         self, 
-        mode: str, 
+        mode: str,
+        arch: str, 
         learning_rate: float = 1e-3, 
         lr_scheduler: str = CosineAnnealingLR.__name__, 
         lr_sch_step_size: int = 8,
@@ -28,8 +30,10 @@ class Image2ImageModule(pl.LightningModule):
         super(Image2ImageModule, self).__init__()
         
         assert mode in ['grayscale', 'grayscale_movie', 'evac'], 'Unknown mode setting!'
+        assert arch in ['DeepLab', 'BeIT', 'SegFormer'], 'Unknown arch setting!'
         
         self.mode = mode
+        self.arch = arch
         self.learning_rate = learning_rate
         self.lr_scheduler = lr_scheduler
         self.lr_sch_step_size = lr_sch_step_size if lr_scheduler=='StepLR' else 50
@@ -43,6 +47,11 @@ class Image2ImageModule(pl.LightningModule):
         self.pred_evac_time = True if self.mode=='evac' else False
         assert self.lr_scheduler in [CosineAnnealingLR.__name__, StepLR.__name__, ExponentialLR.__name__, ReduceLROnPlateau.__name__], 'Unknown LR Scheduler!'      
         
+        self.train_losses = {}
+        self.train_losses_per_epoch = {}
+        self.val_losses = {}
+        self.val_losses_per_epoch = {}
+
         if self.mode in ['grayscale', 'evac']:
             # Regression task
             self.output_channels = 1
@@ -60,15 +69,12 @@ class Image2ImageModule(pl.LightningModule):
         if self.pred_evac_time:
             self.automatic_optimization = False
 
-        self.backbone = resnet.resnet50(pretrained=True, replace_stride_with_dilation=[False, True, True])
-        self.backbone = IntermediateLayerGetter_custom(self.backbone, return_layers={"layer4": "out"}, dropout=self.p_dropout)
-        if self.mode == 'grayscale':
-            self.image_head = DeepLabHead(2048, self.output_channels, relu_at_end=relu_at_end)
-        elif self.mode == 'grayscale_movie':
-            self.image_head = torch.nn.ModuleList([DeepLabHead(2048, self.output_channels, relu_at_end=relu_at_end) for i in range(num_heads)])
-        elif self.mode == 'evac':
-            self.image_head = DeepLabHead(2048, self.output_channels, relu_at_end=relu_at_end, dropout=None)
-            self.evac_head = EvacTimeHead(2048, dropout=self.p_dropout)
+        if arch == 'DeepLab':
+            self.model = DeepLabTraj(self.mode, self.output_channels, self.relu_at_end, self.p_dropout, self.num_heads)
+        elif arch == 'BeIT':
+            self.model = BeITTraj(self.mode, self.output_channels, self.relu_at_end, self.p_dropout, self.num_heads)
+        elif arch == 'SegFormer':
+            self.model = SegFormerTraj(self.mode, self.output_channels, self.relu_at_end, self.p_dropout, self.num_heads)
 
         # self.net = deeplabv3_resnet50(pretrained = False, progress = True, output_channels = self.output_channels, relu_at_end = self.relu_at_end, num_heads=self.num_heads, pred_evac_time=self.pred_evac_time)
 
@@ -92,28 +98,7 @@ class Image2ImageModule(pl.LightningModule):
         # summary(first_part, (3, 800, 800), device='cuda')
     
     def forward(self, x):
-        input_shape = x.shape[-2:]
-        features = self.backbone(x)['out']
-        if self.mode == 'grayscale':
-            # result = OrderedDict()
-            # x = features["out"]
-            x = self.image_head(features)
-            result = F.interpolate(x, size=input_shape, mode="bilinear", align_corners=False)
-        
-        elif self.mode == 'grayscale_movie':
-            result = []
-            for idx, classifier in enumerate(self.image_head):
-                x_class = classifier(features)
-                x_class = F.interpolate(x_class, size=input_shape, mode="bilinear", align_corners=False)
-                result.append(x_class)
-        
-        elif self.mode == 'evac':
-            x = self.image_head(features)
-            x = F.interpolate(x, size=input_shape, mode="bilinear", align_corners=False)
-            ev = self.evac_head(features)
-            result = (x, ev)
-        return result
-        # return self.net(x)
+        return self.model(x)
 
     def training_step(self, batch, batch_idx: int):
         # TODO maybe implement scheduler change once backbone is unfreezed
@@ -162,7 +147,7 @@ class Image2ImageModule(pl.LightningModule):
             opt.step()
             # opt_evac.step()
 
-
+            self.internal_log({'train_loss': train_loss}, stage='train')
             self.log("train_loss", train_loss, on_epoch=True, on_step=True, prog_bar=True, logger=False)
             # self.log("loss", {'loss': train_loss, 'img_loss': img_loss, 'evac_loss': evac_loss/1000.}, on_step=True, on_epoch=True, prog_bar=True, logger=False)
 
@@ -181,6 +166,8 @@ class Image2ImageModule(pl.LightningModule):
                 train_loss = F.mse_loss(traj_pred.squeeze(), traj.float())
             elif self.mode == 'grayscale_movie':
                 train_loss = sum([F.mse_loss(traj_pred_ts.squeeze(), traj[idx].float()) for idx, traj_pred_ts in enumerate(traj_pred)])
+            
+            self.internal_log({'train_loss': train_loss}, stage='train')
             self.log('loss', train_loss, on_step=False, on_epoch=True, logger=False)
             return {'loss' : train_loss}
 
@@ -200,6 +187,7 @@ class Image2ImageModule(pl.LightningModule):
 
             val_loss = img_loss + evac_loss/1000.
 
+            self.internal_log({'val_loss': val_loss}, stage='val')
             self.log('val_loss', val_loss, on_step=False, on_epoch=True, prog_bar=True)
             return {'val_loss' : val_loss, 'img_loss': img_loss, 'evac_loss': evac_loss}
 
@@ -209,8 +197,23 @@ class Image2ImageModule(pl.LightningModule):
                 val_loss = F.mse_loss(traj_pred.squeeze(), traj.float())
             elif self.mode == 'grayscale_movie':
                 val_loss = sum([F.mse_loss(traj_pred_ts.squeeze(), traj[idx].float()) for idx, traj_pred_ts in enumerate(traj_pred)])
+
+            self.internal_log({'val_loss': val_loss}, stage='val')
             self.log('val_loss', val_loss, on_step=False, on_epoch=True, prog_bar=True, logger=False)
             return {'val_loss': val_loss}
+
+
+    def internal_log(self, losses_it, stage):
+        if self.trainer.state.stage == 'sanity_check': return
+
+        losses_logger = self.train_losses if stage=='train' else self.val_losses
+
+        for key, val in losses_it.items():
+            if key not in losses_logger:
+                losses_logger.update({key: [val]})
+            else:
+                losses_logger[key].append(val)
+
 
     def configure_optimizers(self):
         if self.weight_decay not in [None, 0.0]:
@@ -232,9 +235,9 @@ class Image2ImageModule(pl.LightningModule):
                 opt = AdamW([{'params': no_decay_params, 'lr': self.learning_rate}, {'params': decay_params, 'lr': self.learning_rate, 'weight_decay': self.weight_decay}])
         else:
             if self.opt == 'Adam':
-                opt = Adam(self.parameters(), lr = self.learning_rate)
+                opt = Adam(self.model.parameters(), lr = self.learning_rate)
             elif self.opt == 'AdamW':
-                opt = AdamW(self.parameters(), lr = self.learning_rate)
+                opt = AdamW(self.model.parameters(), lr = self.learning_rate)
             
         # opt = Adam(self.parameters(), lr = self.learning_rate)
         
@@ -270,8 +273,22 @@ class Image2ImageModule(pl.LightningModule):
             # schedulers.append(sch_evac)
         return optimizers, schedulers
 
-    def on_epoch_start(self) -> None:
-        # return super().on_epoch_start()
+    def on_fit_start(self) -> None:
+
+        return super().on_epoch_start()
+        if self.arch == 'DeepLab':
+            print('Freezing all layers except new convolutions...')
+            for idx, child in enumerate(self.model.backbone.named_children()):
+                for param in child[1].parameters():
+                    param.requires_grad = False
+            for idx, child in enumerate(self.model.image_head.named_children()):
+                if int(child[0]) > 5:
+                    for param in child[1].parameters():
+                        param.requires_grad = True
+                else:
+                    for param in child[1].parameters():
+                        param.requires_grad = False
+        return super().on_fit_start()
 
         # determine whether backbone freezed at all
         if self.unfreeze_backbone_at_epoch:
@@ -315,39 +332,39 @@ class Image2ImageModule(pl.LightningModule):
                                     param.requires_grad = True
 
 
-    def validation_epoch_end(self, outputs) -> None:
-        if self.trainer.state.stage == 'sanity_check' or isinstance(outputs[0], torch.Tensor): 
-            return super().validation_epoch_end(outputs)
+    # def validation_epoch_end(self, outputs) -> None:
+    #     if self.trainer.state.stage == 'sanity_check' or isinstance(outputs[0], torch.Tensor): 
+    #         return super().validation_epoch_end(outputs)
 
-        feedback_string = ''
-        keys = list(outputs[0].keys())
-        feedback_dict = {key: 0. for key in keys}
-        for output in outputs:
-            for key in keys:
-                feedback_dict[key] += output[key]
-            # loss = sum(output[key] for output in outputs) / len(outputs)
-        for key, loss in feedback_dict.items():
-            feedback_string += f'{key}: {loss/len(outputs):.3f}, '
+    #     feedback_string = ''
+    #     keys = list(outputs[0].keys())
+    #     feedback_dict = {key: 0. for key in keys}
+    #     for output in outputs:
+    #         for key in keys:
+    #             feedback_dict[key] += output[key]
+    #         # loss = sum(output[key] for output in outputs) / len(outputs)
+    #     for key, loss in feedback_dict.items():
+    #         feedback_string += f'{key}: {loss/len(outputs):.3f}, '
         
-        # print(f'\Valid result {self.current_epoch}: ', feedback_string[:-1]+'\n')
-        self.log_result['validation'].append(feedback_string[:-1])
+    #     # print(f'\Valid result {self.current_epoch}: ', feedback_string[:-1]+'\n')
+    #     self.log_result['validation'].append(feedback_string[:-1])
 
 
-    def training_epoch_end(self, outputs) -> None:
-        if isinstance(outputs[0], torch.Tensor) or isinstance(outputs[0], torch.Tensor):
-            return super().training_epoch_end(outputs)
+    # def training_epoch_end(self, outputs) -> None:
+    #     if isinstance(outputs[0], torch.Tensor) or isinstance(outputs[0], torch.Tensor):
+    #         return super().training_epoch_end(outputs)
 
-        feedback_string = ''
-        keys = list(outputs[0].keys())
-        feedback_dict = {key: 0. for key in keys}
-        for output in outputs:
-            for key in keys:
-                feedback_dict[key] += output[key]
-            # loss = sum(output[key] for output in outputs) / len(outputs)
-        for key, loss in feedback_dict.items():
-            feedback_string += f'{key}: {loss/len(outputs):.3f}, '
-        # print(f'\nTrain result epoch {self.current_epoch}: ', feedback_string[:-1]+'\n')
-        self.log_result['training'].append(feedback_string[:-1])
+    #     feedback_string = ''
+    #     keys = list(outputs[0].keys())
+    #     feedback_dict = {key: 0. for key in keys}
+    #     for output in outputs:
+    #         for key in keys:
+    #             feedback_dict[key] += output[key]
+    #         # loss = sum(output[key] for output in outputs) / len(outputs)
+    #     for key, loss in feedback_dict.items():
+    #         feedback_string += f'{key}: {loss/len(outputs):.3f}, '
+    #     # print(f'\nTrain result epoch {self.current_epoch}: ', feedback_string[:-1]+'\n')
+    #     self.log_result['training'].append(feedback_string[:-1])
 
     # def on_fit_end(self):
     #     print('VALIDATION RESULT:')
@@ -358,14 +375,34 @@ class Image2ImageModule(pl.LightningModule):
     #         print(result) 
 
     def on_epoch_end(self) -> None:
-        if self.trainer.state.stage == 'sanity_check': return super().on_epoch_end()
+        if self.trainer.state.stage in ['sanity_check', 'train']: return super().on_epoch_end()
+
+        # Training Logs
+        for key, val in self.train_losses.items():
+            if key not in self.train_losses_per_epoch:
+                mean = sum(val)/len(val)
+                self.train_losses_per_epoch.update({key: [mean.item()]})
+            else:
+                self.train_losses_per_epoch[key].append(sum(val).item()/len(val))
+
+        # Validation logs
+        for key, val in self.val_losses.items():
+            if key not in self.val_losses_per_epoch:
+                mean = sum(val)/len(val)
+                self.val_losses_per_epoch.update({key: [mean.item()]})
+            else:
+                self.val_losses_per_epoch[key].append(sum(val).item()/len(val))
+
+        # Reset
+        self.train_losses = {}
+        self.val_losses = {}
         
         print('\nTRAINING RESULT:')
-        for result in self.log_result['training']:
+        for result in self.train_losses_per_epoch['train_loss']:
             print(result) 
 
         print('\nVALIDATION RESULT:')
-        for result in self.log_result['validation']:
+        for result in self.val_losses_per_epoch['val_loss']:
             print(result)
         print('')
         
