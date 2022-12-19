@@ -4,13 +4,13 @@ from torchvision.models import resnet
 from torch.nn import functional as F
 
 class DeepLabTraj(torch.nn.Module):
-    def __init__(self, mode, output_channels, relu_at_end, p_dropout, num_heads) -> None:
+    def __init__(self, mode, output_channels, num_heads) -> None:
         super().__init__()
 
         self.mode = mode
         self.output_channels = output_channels
-        self.relu_at_end = relu_at_end
-        self.p_dropout = p_dropout
+        self.relu_at_end = True
+        self.p_dropout = 0.0
         self.num_heads = num_heads
 
         self.backbone = resnet.resnet50(pretrained=True, replace_stride_with_dilation=[False, True, True])
@@ -19,7 +19,7 @@ class DeepLabTraj(torch.nn.Module):
             self.image_head = DeepLabHead(2048, self.output_channels, relu_at_end=self.relu_at_end)
         elif self.mode == 'grayscale_movie':
             self.image_head = torch.nn.ModuleList([DeepLabHead(2048, self.output_channels, relu_at_end=self.relu_at_end) for i in range(self.num_heads)])
-        elif self.mode == 'evac':
+        elif self.mode in ['evac', 'grayscale_norm_evac']:
             self.image_head = DeepLabHead(2048, self.output_channels, relu_at_end=self.relu_at_end, dropout=None)
             self.evac_head = EvacTimeHead(2048, dropout=self.p_dropout)
 

@@ -3,7 +3,7 @@ from transformers import SegformerForSemanticSegmentation
 from torch.nn import functional as F
 
 class SegFormerTraj(torch.nn.Module):
-    def __init__(self, mode, output_channels, relu_at_end, p_dropout, num_heads) -> None:
+    def __init__(self, mode, output_channels) -> None:
         super().__init__()
 
         self.mode = mode

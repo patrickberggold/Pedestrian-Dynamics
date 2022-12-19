@@ -7,22 +7,19 @@ from .FloorplanDataset import Dataset_Img2Img
 from helper import SEP
 
 class FloorplanDataModule(pl.LightningDataModule):
-    def __init__(
-        self, 
-        mode: str,
-        arch: str, 
-        cuda_index: int, 
-        batch_size: int = 4, 
-        splits: list = [0.7, 0.15, 0.15], 
-        num_workers: int = 0, 
-        num_ts_per_floorplan: int = 1,
-        vary_area_brightness: bool = True,
-        ):
+    def __init__(self, config: dict, num_workers: int = 2):
         super().__init__()
-        assert mode in ['grayscale', 'grayscale_movie', 'evac'], 'Unknown mode setting!'
+        self.mode = config['mode']
+        self.batch_size = config['batch_size']
+        self.additional_info = config['additional_info']
+        arch = config['arch']
+        self.cuda_device = config['cuda_device']
+        self.vary_area_brightness = config['vary_area_brightness']
+        self.limit_dataset = config['limit_dataset']
+        self.num_workers = num_workers
+
+        assert self.mode in ['grayscale', 'grayscale_movie', 'evac_only', 'class_movie', 'density_class', 'density_reg', 'denseClass_wEvac'], 'Unknown mode setting!'
         assert arch in ['DeepLab', 'BeIT', 'SegFormer']
-        self.mode = mode
-        self.batch_size = batch_size
 
         if arch in ['BeIT', 'SegFormer']:
             if arch == 'BeIT':
@@ -48,20 +45,12 @@ class FloorplanDataModule(pl.LightningDataModule):
             self.train_transforms = None
             self.val_transforms = None
 
-        self.cuda_index = cuda_index
-        self.num_workers = num_workers
-        self.vary_area_brightness = vary_area_brightness
-        if self.mode == 'grayscale_movie':
-            assert num_ts_per_floorplan > 1 and isinstance(num_ts_per_floorplan, int)
-            self.num_ts_per_floorplan = num_ts_per_floorplan
-        else:
-            self.num_ts_per_floorplan = 1
-        self.set_data_paths(splits)
+        self.set_data_paths()
 
     def setup(self, stage):
-        self.train_dataset = Dataset_Img2Img(self.mode, self.train_imgs_list, self.train_trajs_list, transform=self.train_transforms, num_ts_per_floorplan=self.num_ts_per_floorplan, vary_area_brightness=self.vary_area_brightness)
-        self.val_dataset = Dataset_Img2Img(self.mode, self.val_imgs_list, self.val_trajs_list, transform=self.val_transforms, num_ts_per_floorplan=self.num_ts_per_floorplan, vary_area_brightness=self.vary_area_brightness)
-        self.test_dataset = Dataset_Img2Img(self.mode, self.test_imgs_list, self.test_trajs_list, transform=self.val_transforms, num_ts_per_floorplan=self.num_ts_per_floorplan, vary_area_brightness=self.vary_area_brightness)
+        self.train_dataset = Dataset_Img2Img(self.mode, self.train_imgs_list, self.train_trajs_list, transform=self.train_transforms, additional_info = self.additional_info)
+        self.val_dataset = Dataset_Img2Img(self.mode, self.val_imgs_list, self.val_trajs_list, transform=self.val_transforms, additional_info = self.additional_info)
+        self.test_dataset = Dataset_Img2Img(self.mode, self.test_imgs_list, self.test_trajs_list, transform=self.val_transforms, additional_info = self.additional_info)
 
     def train_dataloader(self):
         return DataLoader(self.train_dataset, batch_size=self.batch_size, num_workers=self.num_workers)
@@ -79,27 +68,33 @@ class FloorplanDataModule(pl.LightningDataModule):
         self.batch_size = new_batch_size
 
     def transfer_batch_to_device(self, batch, device, dataloader_idx):
-        if self.cuda_index != 'cpu':
-            device = torch.device('cuda', self.cuda_index)
+        if self.cuda_device != 'cpu':
+            device = torch.device('cuda', self.cuda_device)
             batch = super().transfer_batch_to_device(batch, device, dataloader_idx)
             return batch
 
-    def set_data_paths(self,  splits: list):
+    def set_data_paths(self):
         
-        assert sum(splits) == 1., 'Splits do not accumulate to 100%'
-        assert len(splits) == 3, 'Splits are not transfered in correct format (which is [train_split, val_split, test_split])'
-        self.splits = splits
+        self.splits = [0.7, 0.15, 0.15]
 
         if not self.vary_area_brightness:
             raise NotImplementedError('Dataset with overall same number of agents does not exist!')
 
         # self.img_path = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'SIMPLE_FLOORPLANS', 'HDF5_INPUT_IMAGES_resolution_800_800'])
-        root_img_dir = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS', 'INPUT'])
-        self.img_path = [os.path.join(root_img_dir, layout_dir, floorplan_dir) for layout_dir in os.listdir(root_img_dir) for floorplan_dir in os.listdir(os.path.join(root_img_dir, layout_dir))]
+        if self.mode=='class_movie':
+            root_img_dir = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS_SPARSE', 'INPUT'])
+            root_traj_dir = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS_SPARSE', f'SPARSE_GT_VELOCITY_MASKS_thickness_5_nframes_10'])
+        elif self.mode in ['density_reg', 'density_class', 'denseClass_wEvac']:
+            root_img_dir = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS_SPARSE', 'SPARSE_DENSITY_INPUT_640'])
+            root_traj_dir = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS_SPARSE', f'SPARSE_DENSITY_BINS'])
+            if self.mode == 'denseClass_wEvac': root_traj_dir = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS_SPARSE', 'SPARSE_DENSITY_BINS_wEVAC'])
+        else:
+            root_img_dir = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS', 'INPUT'])
+            root_traj_dir = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS', f'HDF5_GT_TIMESTAMP_MASKS_thickness_5'])
         
         # self.traj_path = [SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'SIMPLE_FLOORPLANS', f'HDF5_GT_TIMESTAMP_MASKS_resolution_800_800_numAgents_{var}_thickness_5']) for var in [10, 20, 30, 40, 50]]
-        root_traj_dir = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS', f'HDF5_GT_TIMESTAMP_MASKS_thickness_5'])
         self.traj_path = [os.path.join(root_traj_dir, layout_dir, floorplan_dir) for layout_dir in os.listdir(root_traj_dir) if os.path.isdir(os.path.join(root_traj_dir, layout_dir)) for floorplan_dir in os.listdir(os.path.join(root_traj_dir, layout_dir))]
+        self.img_path = [os.path.join(root_img_dir, layout_dir, floorplan_dir) for layout_dir in os.listdir(root_img_dir) if os.path.isdir(os.path.join(root_img_dir, layout_dir)) for floorplan_dir in os.listdir(os.path.join(root_img_dir, layout_dir))]
 
         self.set_filepaths()
 
@@ -130,14 +125,15 @@ class FloorplanDataModule(pl.LightningDataModule):
         self.test_trajs_list = [self.traj_list[idx] for idx in self.indices[:test_split_index]]
 
         # LIMIT THE DATASET
-        # self.train_imgs_list = self.train_imgs_list[:1000]
-        # self.train_trajs_list = self.train_trajs_list[:1000]
+        if self.limit_dataset:
+            self.train_imgs_list = self.train_imgs_list[:self.limit_dataset]
+            self.train_trajs_list = self.train_trajs_list[:self.limit_dataset]
 
-        # self.val_imgs_list = self.val_imgs_list[:200]
-        # self.val_trajs_list = self.val_trajs_list[:200]
+            self.val_imgs_list = self.val_imgs_list[:self.limit_dataset//4]
+            self.val_trajs_list = self.val_trajs_list[:self.limit_dataset//4]
 
-        # self.test_imgs_list = self.test_imgs_list[:200]
-        # self.test_trajs_list = self.test_trajs_list[:200]
+            self.test_imgs_list = self.test_imgs_list[:self.limit_dataset//4]
+            self.test_trajs_list = self.test_trajs_list[:self.limit_dataset//4]
 
     def set_filepaths(self):
 
@@ -147,18 +143,34 @@ class FloorplanDataModule(pl.LightningDataModule):
         for img_path, traj_path in zip(self.img_path, self.traj_path):
             assert img_path.split(SEP)[-1] == traj_path.split(SEP)[-1]
 
-            sorted_imgs = sorted(os.listdir(img_path), key=lambda x: int(x.split('_')[-1].replace('.h5', '')))
-            sorted_traj = sorted(os.listdir(traj_path), key=lambda x: int(x.split('_')[-1]))
+            if self.mode not in ['density_class', 'density_reg', 'denseClass_wEvac']:
 
-            for img_var, traj_var in zip(sorted_imgs, sorted_traj):
-                
-                assert traj_var in img_var # check if i.e. 'variation_9' in img_path
-                
-                for agent_var in os.listdir(os.path.join(traj_path, traj_var)):
+                sorted_imgs = [i_path for i_path in os.listdir(img_path) if i_path.endswith('.h5')]
+                sorted_imgs = sorted(sorted_imgs, key=lambda x: int(x.split('_')[-1].replace('.h5', '')))
+                sorted_traj = sorted(os.listdir(traj_path), key=lambda x: int(x.split('_')[-1]))
 
-                    self.img_list.append(os.path.join(img_path, img_var))
-                    self.traj_list.append(os.path.join(traj_path, traj_var, agent_var))
+                for img_var, traj_var in zip(sorted_imgs, sorted_traj):
+                    
+                    assert traj_var in img_var # check if i.e. 'variation_9' in img_path
+                    
+                    for agent_var in os.listdir(os.path.join(traj_path, traj_var)):
 
-                    assert os.path.isfile(self.img_list[-1])
-                    assert os.path.isfile(self.traj_list[-1])
+                        self.img_list.append(os.path.join(img_path, img_var))
+                        self.traj_list.append(os.path.join(traj_path, traj_var, agent_var))
 
+                        assert os.path.isfile(self.img_list[-1])
+                        assert os.path.isfile(self.traj_list[-1])
+            else:
+                sorted_imgs = sorted([path for path in os.listdir(img_path) if not path.endswith('.txt')], key=lambda x: int(x.split('_')[-1]))
+                sorted_traj = sorted(os.listdir(traj_path), key=lambda x: int(x.split('_')[-1]))
+
+                for img_var, traj_var in zip(sorted_imgs, sorted_traj):
+                    
+                    assert traj_var == img_var # check if i.e. 'variation_9' in img_path
+                    for agent_var in os.listdir(os.path.join(traj_path, traj_var)):
+
+                        self.img_list.append(os.path.join(img_path, img_var, agent_var))
+                        self.traj_list.append(os.path.join(traj_path, traj_var, agent_var))
+
+                        assert os.path.isfile(self.img_list[-1])
+                        assert os.path.isfile(self.traj_list[-1])

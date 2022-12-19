@@ -11,21 +11,23 @@ import json
 from collections import OrderedDict
  
 def hyperparameter_optimization(
-    mode: str, 
+    config: dict,
+    train_config: str,
     datamodule: pl.LightningDataModule, 
     n_trials: int, 
     epochs_per_trial: int, 
     folder_name: str,
     cuda_device: int = 0,
-    test_run: bool = True,
     ):
 
+    mode = config['mode']
+    test_run = config['run_test_epoch']
     if test_run: n_trials = 2
     if test_run: epochs_per_trial = 2
     limit_train_batches = 2 if test_run else None
     limit_val_batches = 2 if test_run else None
 
-    assert mode in ['grayscale', 'grayscale_movie', 'evac'], 'Unknown mode setting!'
+    assert mode in ['grayscale', 'grayscale_movie', 'evac', 'evac_only'], 'Unknown mode setting!'
     
     ROOT_PATH = SEP.join(['Image2Image', 'Optimization'])
     folder_path = os.path.join(ROOT_PATH, folder_name)
@@ -40,26 +42,44 @@ def hyperparameter_optimization(
     def objective(trial: optuna.trial.Trial) -> float:
 
         # Hyperparameters to be optimized
-        learning_rate = trial.suggest_float("lr", 8e-5, 8e-4)
-        lr_scheduler = trial.suggest_categorical("sch", ['ReduceLROnPlateau', 'ExponentialLR'])
-        dropout = trial.suggest_float("dropout", 0.02, 0.45)
-        # opt = trial.suggest_categorical("opt", ['Adam', 'AdamW'])
-        gamma = trial.suggest_float('gamma', 0.1, 0.3)
+        learning_rate = trial.suggest_float("lr", 1e-4, 3e-3)
+        # lr_scheduler = trial.suggest_categorical("lr_scheduler", ['ReduceLROnPlateau', 'ExponentialLR', 'CosineAnnealingLR'])
+        # gamma = trial.suggest_float('gamma', 0.1, 0.3)
         # batch_size = trial.suggest_categorical("batch_size", [4, 8])
-        # weight_decay = trial.suggest_categorical("weight_decay", [0.0, 1e-6, 1e-5, 1e-4, 1e-3])
+        # weight_decay = trial.suggest_categorical("weight_decay", [0.0, 1e-6, 1e-5])
 
         # datamodule.set_batch_size(batch_size)
 
-        module = Image2ImageModule(mode=mode, unfreeze_backbone_at_epoch=None, lr_scheduler=lr_scheduler, learning_rate=learning_rate, alternate_unfreezing=True, lr_sch_gamma=gamma, weight_decay=1e-6, p_dropout=dropout)
+        train_config['learning_rate'] = learning_rate
 
-        # Load from checkpoint
-        CKPT_PATH = SEP.join(['Image2Image', 'checkpoints', 'checkpoints_DeepLab4Img2Img', 'trained_img_and_evac.ckpt'])
-        state_dict = OrderedDict([(key.replace('net.', ''), tensor) if key.startswith('net.') else (key, tensor) for key, tensor in torch.load(CKPT_PATH).items()])
+        module = Image2ImageModule(config=config, train_config=train_config)
 
-        module.load_state_dict(OrderedDict((k_module, v_loaded) for (k_loaded, v_loaded), (k_module, v_module) in zip(state_dict.items(), module.state_dict().items())))
+        if config['from_ckpt_path']:
+            CKPT_PATH = SEP.join(['Image2Image', 'checkpoints', 'checkpoints_DeepLab4Img2Img', config['from_ckpt_path']])
+            state_dict = OrderedDict([(key.replace('net.', ''), tensor) if key.startswith('net.') else (key, tensor) for key, tensor in torch.load(CKPT_PATH)['state_dict'].items()])
+            module_state_dict = module.state_dict()
+
+            mkeys_missing_in_loaded = [module_key for module_key in list(module_state_dict.keys()) if module_key not in list(state_dict.keys())]
+            lkeys_missing_in_module = [loaded_key for loaded_key in list(state_dict.keys()) if loaded_key not in list(module_state_dict.keys())]
+
+            load_dict = OrderedDict()
+            for key, tensor in module_state_dict.items():
+                # if (key in state_dict.keys()) and ('decode_head' not in key):
+                if key in state_dict.keys():
+                    load_dict[key] = state_dict[key]
+                else:
+                    # if key == 'model.model.classifier.classifier.weight':
+                    #     load_dict[key] = state_dict['model.model.classifier.weight']
+                    # elif key == 'model.model.classifier.classifier.bias': 
+                    #     load_dict[key] = state_dict['model.model.classifier.bias']
+                    # else:
+                    #     load_dict[key] = tensor
+                    load_dict[key] = tensor
+
+            module.load_state_dict(load_dict)
 
         # TODO implement feedback when trials are pruned
-        hyperparameters = dict(lr=learning_rate, sch=lr_scheduler, gamma=gamma, dropout=dropout)
+        hyperparameters = dict(lr=learning_rate) # ,lr_scheduler=lr_scheduler
 
         start_trial_string = f'\n#################################################################################################################' + \
             f'\nSTARTING NEW TRIAL {trial.number+1}/{n_trials} WITH {epochs_per_trial} EPOCHS PER TRIAL with:\n'

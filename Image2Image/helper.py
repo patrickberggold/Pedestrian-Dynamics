@@ -1,8 +1,8 @@
+import os
 import torch
 from torch.utils import data
 import numpy as np
-import os
-import cv2
+from collections import OrderedDict
 import h5py
 import random
 import matplotlib.pyplot as plt
@@ -10,9 +10,47 @@ from matplotlib import cm
 from matplotlib.colors import ListedColormap, LinearSegmentedColormap
 from scipy import ndimage
 import platform
+import imageio
 
 OpSys = platform.system()
 SEP = '\\' if OpSys == 'Windows' else '/'
+
+def time_flow_creator(img, masks, max_time, filecounter):
+    gt_mask, pred_mask = masks
+
+    root_path = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Pedestrian-Dynamics', 'Image2Image', 'progress_report'])
+
+    n_steps = 16
+    time_interval = max_time/n_steps
+    time_limits = [[i*time_interval, (i+1)*time_interval] for i in range(n_steps)]
+    time_limits[0][0] = time_limits[0][0]+1.
+    
+    folder_path = os.path.join(root_path, f'img_{filecounter}')
+    if not os.path.isdir(folder_path): 
+        os.mkdir(folder_path)
+        gif_create = True
+    else:
+        gif_create = True if len(os.listdir(folder_path)) == 0 else False
+    
+    if gif_create:
+        for idm, mask in enumerate(masks):
+            descr = 'gt' if idm == 0 else 'pred'
+            img_list = []
+            for idl, (low_lim, up_lim) in enumerate(time_limits):
+                stamped_img = img.copy()
+                coords = np.argwhere((mask >= low_lim) & (mask <= up_lim))
+                colored_timestamps = [get_color_from_array(mask[x, y], max_time)/255. for x, y in coords]
+                if len(colored_timestamps) > 0: stamped_img[coords[:,0], coords[:,1]] = np.array(colored_timestamps)
+                # plt.imshow(stamped_img)
+                plt.close('all')
+                img_store_path = os.path.join(folder_path, f'img_{descr}_{idl}.png')
+                stamped_img = np.clip(stamped_img, 0., 1.)
+                plt.imsave(img_store_path, stamped_img)
+
+                img_list.append(imageio.imread(img_store_path))
+
+            gif_store_path = os.path.join(folder_path, f'gif_{descr}.gif')
+            imageio.mimsave(gif_store_path, img_list)
 
 CLASS_NAMES = {
     # get color values from https://doc.instantreality.org/tools/color_calculator/
