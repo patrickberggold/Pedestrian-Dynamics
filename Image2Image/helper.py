@@ -12,8 +12,10 @@ from scipy import ndimage
 import platform
 import imageio
 
-OpSys = platform.system()
-SEP = '\\' if OpSys == 'Windows' else '/'
+OPSYS = platform.system()
+SEP = '\\' if OPSYS == 'Windows' else '/'
+PREFIX = '/mnt/c' if OPSYS == 'Linux' else 'C:'
+
 
 def time_flow_creator(img, masks, max_time, filecounter):
     gt_mask, pred_mask = masks

@@ -3,12 +3,7 @@ from torch.nn import functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR, ExponentialLR, ReduceLROnPlateau
 from torch.optim import Adam, AdamW
 import pytorch_lightning as pl
-from torchsummary import summary
-from models import deeplabv3_resnet50
-# from torchvision.models.segmentation.deeplabv3 import deeplabv3_resnet50
-from .deeplab_traj_pred import DeepLabTraj
-from .beit_traj_pred import BeITTraj
-from .segformer_traj_pred import SegFormerTraj
+# from torchsummary import summary
 
 class Image2ImageModule(pl.LightningModule):
     def __init__(
@@ -72,13 +67,19 @@ class Image2ImageModule(pl.LightningModule):
             # self.automatic_optimization = False
 
         if self.arch == 'DeepLab':
+            from .deeplab_traj_pred import DeepLabTraj
             self.model = DeepLabTraj(self.mode, self.output_channels, self.num_heads)
         elif self.arch == 'BeIT':
+            from .beit_traj_pred import BeITTraj
             self.model = BeITTraj(self.mode, self.output_channels, self.num_heads, additional_info=self.additional_info)
         elif self.arch == 'SegFormer':
+            from .segformer_traj_pred import SegFormerTraj
             self.model = SegFormerTraj(self.mode, self.output_channels)
-
-        # self.net = deeplabv3_resnet50(pretrained = False, progress = True, output_channels = self.output_channels, relu_at_end = True, num_heads=self.num_heads, pred_evac_time=self.pred_evac_time)
+        elif self.arch == 'DeepLab':
+            from models import deeplabv3_resnet50
+            self.net = deeplabv3_resnet50(pretrained = False, progress = True, output_channels = self.output_channels, relu_at_end = True, num_heads=self.num_heads, pred_evac_time=self.pred_evac_time)
+        else:
+            raise NotImplementedError
 
 
     def dice_loss(self, gt, logits, eps=1e-7):
@@ -419,13 +420,13 @@ class Image2ImageModule(pl.LightningModule):
             continue
         return super().on_fit_start()
 
-    def on_epoch_end(self) -> None:
+    def on_train_epoch_end(self) -> None:
         # if self.current_epoch == 1:
         #     print(f'\nUnfreezing all parameters in epoch {self.current_epoch}...')
         #     for param in self.parameters():
         #         param.requires_grad = True
 
-        if self.trainer.state.stage in ['sanity_check', 'train']: return super().on_epoch_end()
+        if self.trainer.state.stage in ['sanity_check']: return super().on_epoch_end()
         self.print_logs()
     
 

@@ -95,7 +95,7 @@ class BeITTraj(nn.Module):
 
     def forward(self, x, *args):
 
-        input_shape = (800, 800)
+        input_shape = (640, 640)
         if self.mode == 'grayscale':
             logits = self.model(x).logits
             logits = nn.ReLU()(logits)
@@ -116,10 +116,10 @@ class BeITTraj(nn.Module):
                 img_gt[traj_pred_bigger_thresh[:,0], traj_pred_bigger_thresh[:,1]] = np.array(pred_colors_from_timestamps)
                 plt.imshow(img_gt)
                 plt.close('all') """
-            # x = F.interpolate(logits, size=input_shape, mode="bilinear", align_corners=False)
+            x = F.interpolate(logits, size=input_shape, mode="bilinear", align_corners=False)
             
             # x = nn.AdaptiveMaxPool2d(input_shape)(logits)
-            x = self.model.high_res_net(logits)
+            # x = self.model.high_res_net(logits)
         elif self.mode == 'evac_only':
             if len(args) > 0:
                 x = self.model(x, *args).logits

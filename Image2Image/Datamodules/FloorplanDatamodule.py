@@ -4,7 +4,7 @@ from torchvision.transforms import Compose, RandomResizedCrop, RandomHorizontalF
 from torch.utils.data import DataLoader
 import os, random
 from .FloorplanDataset import Dataset_Img2Img
-from helper import SEP
+from helper import SEP, PREFIX
 
 class FloorplanDataModule(pl.LightningDataModule):
     def __init__(self, config: dict, num_workers: int = 2):
@@ -27,16 +27,19 @@ class FloorplanDataModule(pl.LightningDataModule):
                 feature_extractor = BeitFeatureExtractor.from_pretrained('microsoft/beit-base-finetuned-ade-640-640')
             elif arch == 'SegFormer':
                 from transformers import SegformerFeatureExtractor
-                feature_extractor = SegformerFeatureExtractor.from_pretrained('nvidia/segformer-b0-finetuned-cityscapes-768-768')            
+                # https://xieenze.github.io/segformer.pdf
+                # feature_extractor = SegformerFeatureExtractor.from_pretrained('nvidia/segformer-b5-finetuned-ade-640-640')
+                feature_extractor = SegformerFeatureExtractor.from_pretrained('nvidia/segformer-b1-finetuned-cityscapes-1024-1024')
+            img_size = 640 # feature_extractor.size
             self.train_transforms = Compose([
-                Resize(feature_extractor.size),
+                Resize(img_size),
                 # RandomResizedCrop(feature_extractor.size),
                 # RandomHorizontalFlip(),
                 # ToTensor(),
                 Normalize(mean=feature_extractor.image_mean, std=feature_extractor.image_std),
             ])
             self.val_transforms = Compose([
-                Resize(feature_extractor.size),
+                Resize(img_size),
                 # CenterCrop(feature_extractor.size),
                 # ToTensor(),
                 Normalize(mean=feature_extractor.image_mean, std=feature_extractor.image_std),
@@ -80,19 +83,23 @@ class FloorplanDataModule(pl.LightningDataModule):
         if not self.vary_area_brightness:
             raise NotImplementedError('Dataset with overall same number of agents does not exist!')
 
-        # self.img_path = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'SIMPLE_FLOORPLANS', 'HDF5_INPUT_IMAGES_resolution_800_800'])
+        # self.img_path = SEP.join([PREFIX, 'Users', 'Remotey', 'Documents', 'Datasets', 'SIMPLE_FLOORPLANS', 'HDF5_INPUT_IMAGES_resolution_800_800'])
         if self.mode=='class_movie':
-            root_img_dir = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS_SPARSE', 'INPUT'])
-            root_traj_dir = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS_SPARSE', f'SPARSE_GT_VELOCITY_MASKS_thickness_5_nframes_10'])
+            root_img_dir = SEP.join([PREFIX, 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS_SPARSE', 'INPUT'])
+            root_traj_dir = SEP.join([PREFIX, 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS_SPARSE', f'SPARSE_GT_VELOCITY_MASKS_thickness_5_nframes_10'])
         elif self.mode in ['density_reg', 'density_class', 'denseClass_wEvac']:
-            root_img_dir = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS_SPARSE', 'SPARSE_DENSITY_INPUT_640'])
-            root_traj_dir = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS_SPARSE', f'SPARSE_DENSITY_BINS'])
-            if self.mode == 'denseClass_wEvac': root_traj_dir = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS_SPARSE', 'SPARSE_DENSITY_BINS_wEVAC'])
+            root_img_dir = SEP.join([PREFIX, 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS_SPARSE', 'SPARSE_DENSITY_INPUT_640'])
+            root_traj_dir = SEP.join([PREFIX, 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS_SPARSE', f'SPARSE_DENSITY_BINS'])
+            if self.mode == 'denseClass_wEvac': root_traj_dir = SEP.join([PREFIX, 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS_SPARSE', 'SPARSE_DENSITY_BINS_wEVAC'])
+        elif self.mode == 'grayscale':
+            root_img_dir = SEP.join([PREFIX, 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS_SPARSE', 'SPARSE_DENSITY_INPUT_640'])
+            root_traj_dir = SEP.join([PREFIX, 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS_SPARSE', f'SPARSE_TIMESTAMPS_MASKS'])
         else:
-            root_img_dir = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS', 'INPUT'])
-            root_traj_dir = SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS', f'HDF5_GT_TIMESTAMP_MASKS_thickness_5'])
+            root_img_dir = SEP.join([PREFIX, 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS', 'INPUT'])
+            root_traj_dir = SEP.join([PREFIX, 'Users', 'Remotey', 'Documents', 'Datasets', 'ADVANCED_FLOORPLANS', f'HDF5_GT_TIMESTAMP_MASKS_thickness_5'])
+            raise NotImplementedError('Both img and traj folders have to be unzipped first!')
         
-        # self.traj_path = [SEP.join(['C:', 'Users', 'Remotey', 'Documents', 'Datasets', 'SIMPLE_FLOORPLANS', f'HDF5_GT_TIMESTAMP_MASKS_resolution_800_800_numAgents_{var}_thickness_5']) for var in [10, 20, 30, 40, 50]]
+        # self.traj_path = [SEP.join([PREFIX, 'Users', 'Remotey', 'Documents', 'Datasets', 'SIMPLE_FLOORPLANS', f'HDF5_GT_TIMESTAMP_MASKS_resolution_800_800_numAgents_{var}_thickness_5']) for var in [10, 20, 30, 40, 50]]
         self.traj_path = [os.path.join(root_traj_dir, layout_dir, floorplan_dir) for layout_dir in os.listdir(root_traj_dir) if os.path.isdir(os.path.join(root_traj_dir, layout_dir)) for floorplan_dir in os.listdir(os.path.join(root_traj_dir, layout_dir))]
         self.img_path = [os.path.join(root_img_dir, layout_dir, floorplan_dir) for layout_dir in os.listdir(root_img_dir) if os.path.isdir(os.path.join(root_img_dir, layout_dir)) for floorplan_dir in os.listdir(os.path.join(root_img_dir, layout_dir))]
 
@@ -143,7 +150,7 @@ class FloorplanDataModule(pl.LightningDataModule):
         for img_path, traj_path in zip(self.img_path, self.traj_path):
             assert img_path.split(SEP)[-1] == traj_path.split(SEP)[-1]
 
-            if self.mode not in ['density_class', 'density_reg', 'denseClass_wEvac']:
+            if self.mode not in ['density_class', 'density_reg', 'denseClass_wEvac', 'grayscale']:
 
                 sorted_imgs = [i_path for i_path in os.listdir(img_path) if i_path.endswith('.h5')]
                 sorted_imgs = sorted(sorted_imgs, key=lambda x: int(x.split('_')[-1].replace('.h5', '')))

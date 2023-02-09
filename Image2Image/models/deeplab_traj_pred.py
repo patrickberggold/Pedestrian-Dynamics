@@ -1,5 +1,5 @@
 import torch
-from models.deeplabv3_resnet50_custom import DeepLabHead, DeepLabV3MulitHead, DeepLabV3, EvacTimeHead, IntermediateLayerGetter_custom
+from Image2Image.models.deeplabv3_resnet50_custom import DeepLabHead, DeepLabV3MulitHead, DeepLabV3, EvacTimeHead, IntermediateLayerGetter_custom
 from torchvision.models import resnet
 from torch.nn import functional as F
 

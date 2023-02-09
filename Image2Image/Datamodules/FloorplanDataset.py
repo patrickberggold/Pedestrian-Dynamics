@@ -51,14 +51,18 @@ class Dataset_Img2Img(Dataset):
     def __getitem__(self, idx):
         img_path, traj_path = self.img_paths[idx], self.traj_paths[idx]
 
-        if self.mode in ['density_reg', 'density_class', 'denseClass_wEvac']:
+        if self.mode in ['density_reg', 'density_class', 'denseClass_wEvac', 'grayscale']:
 
             traj_aug_mode = 0 if self.mode=='density_reg' else 1
             
             img = sparse.load_npz(img_path).todense()
             img = img.astype(np.float32) / 255.
             if self.mode != 'denseClass_wEvac':
-                traj = sparse.load_npz(traj_path).todense().transpose(1,2,0)
+                traj = sparse.load_npz(traj_path).todense()
+                if self.mode != 'grayscale': 
+                    traj = traj.transpose(1,2,0)
+                else:
+                    traj_aug_mode = 0
             else:
                 with np.load(traj_path) as fp:
                     coords = fp["coords"]
@@ -404,9 +408,9 @@ class Dataset_Img2Img(Dataset):
 
         # flipping, transposing, random 90 deg rotations
         transform = A.Compose([
-            A.augmentations.transforms.HorizontalFlip(p=0.5),
-            A.augmentations.transforms.VerticalFlip(p=0.5),
-            A.augmentations.transforms.Transpose(p=0.5),
+            A.augmentations.geometric.transforms.HorizontalFlip(p=0.5),
+            A.augmentations.geometric.transforms.VerticalFlip(p=0.5),
+            A.augmentations.geometric.transforms.Transpose(p=0.5),
             A.augmentations.geometric.rotate.RandomRotate90(p=0.5),
         ])
         if traj_aug_mode == 0:
