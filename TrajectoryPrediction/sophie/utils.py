@@ -15,7 +15,7 @@ def get_dset_path(dset_name, dset_type):
     return os.path.join('C:\\Users\\Remotey\\Documents\\Pedestrian-Dynamics\\TrajectoryPrediction\\sophie\\datasets', dset_name, dset_type)
 
 def get_dset_path_floorplans(dset_name):
-    return os.path.join('C:\\Users\\Remotey\\Documents\\Datasets\\CSV_SIMULATION_DATA_numAgents_50', dset_name)
+    return os.path.join('C:\\Users\\Remotey\\Documents\\Datasets\\SIMPLE_FLOORPLANS\\CSV_SIMULATION_DATA_numAgents_50', dset_name)
 
 def relative_to_abs(rel_traj, start_pos):
     rel_traj = rel_traj.permute(1, 0, 2)

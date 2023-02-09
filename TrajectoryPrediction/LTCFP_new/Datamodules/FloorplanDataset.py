@@ -3,7 +3,7 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 import numpy as np
 import h5py
-from helper import SEP
+from helper import SEP, OPSYS, PREFIX
 import matplotlib.pyplot as plt
 import albumentations as A
 import random
@@ -13,6 +13,8 @@ from Datamodules.SceneLoader import Scene_floorplan
 import warnings
 from Modules.goal.models.goal.utils import create_CNN_inputs_loop
 import torchvision.transforms.functional as F
+from tqdm import tqdm
+import sparse
 
 def is_legitimate_traj(traj_df, step):
     agent_id = traj_df.agent_id.values
@@ -32,40 +34,247 @@ def is_legitimate_traj(traj_df, step):
     return True
 
 class Dataset_Seq2Seq(Dataset):
-    """
-    Dataset class to load iteratively pre-made batches saved as pickle files.
-    Apply data augmentation when needed.
-    """
 
-    def __init__(self, img_list: list, csv_list: list, split: str, batch_size: int = 32):
-
+    def __init__(self, arch: str, img_list: list, csv_list: list, split: str, data_format: str = 'by_frame', traj_quantity: str = 'pos', batch_size: int = 100, normalize_dataset: bool = True, transforms = {}, read_from_pickle: bool = False):
+        # TODO implement more sophisticated data loading from AgentFormer
+        self.arch = arch
         self.name = "floorplan"
-        self.floorplan_root = 'C:\\Users\\Remotey\\Documents\\Datasets\\ADVANCED_FLOORPLANS'
-        self.dataset_folder_rgb = os.path.join(self.floorplan_root, "INPUT")
-        self.dataset_folder_csv = os.path.join(self.floorplan_root, "CSV_GT_TRAJECTORIES")
 
         self.layout_types = ['corr_e2e', 'corr_cross']
-
+        self.data_format = data_format
+        self.traj_quantity = traj_quantity
+        assert self.data_format in ['random', 'by_frame']
+        assert self.traj_quantity in ['pos', 'vel']
+        
+        self.batch_size = 16 if arch == 'goal' else 1000 # 203 vs 1482 can I use the same batch size in the original tf? if not, some mistake... --> uses 10 GB for BS=1000
+        self.dataset_limit = None
+        
         self.seq_length = 20
-        self.data_augmentation = True if split == 'train' else False
+        
+        self.split = split
+        
+        # self.data_augmentation = True if split == 'train' else False
+        self.data_augmentation = True
 
         # self.dataset_folder = self.dataset_folder_rgb # os.path.join(self.dataset_folder_rgb, scene_name.split(SEP)[0], scene_name.split(SEP)[1])
         # self.scene_folder = os.path.join(self.dataset_folder, self.name)
 
-        self.scenes = {i: Scene_floorplan(img_path, csv_path, verbose=False) for  i, (img_path, csv_path) in enumerate(zip(img_list, csv_list))}# i, scene_name in enumerate(img_list)}
+        if not read_from_pickle:
+            self.scenes = {i: Scene_floorplan(img_path, csv_path, verbose=False) for  i, (img_path, csv_path) in enumerate(tqdm(zip(img_list, csv_list), desc=f'[stage=={self.split}]\tLoading scenes...', total=len(img_list)))}# i, scene_name in enumerate(img_list)}
 
-        self.final_resolution = 800
+        self.transforms = transforms['transforms']
+        self.img_size = transforms['feature_extractor_size']
+        
+        assert self.img_size == 640, 'Resizing is necessary, either via torchvision (in Datamodule) or Albumentations (here in Dataset)!'
+        
+        # handcrafted for now...
+        self.overall_mean = self.img_size // 2
+        self.overall_std = 75
+        self.normalize_dataset = normalize_dataset
+
+        # Normalize coordinate system
+        # assert self.scenes[0].image_res_x == self.scenes[0].image_res_y
+        # self.shift_cs = self.scenes[0].image_res_x // 2
+
+        # self.final_resolution = 640
         self.max_floorplan_meters = 70
+        
+        self.dataset_statistics = {
+            'corr_e2e': {
+                'mean': [300.6625 , 319.4248],
+                'std': [103.7613 , 23.8261],
+            },
+            'corr_cross': {
+                'mean': [318.6957 , 319.7076],
+                'std': [116.2994 , 27.9643],
+            },
+            'train_station': {
+                'mean': [315.6758, 311.8410],
+                'std': [111.2399, 65.4355],
+            }
+        }
+        means = [stat_dict['mean'] for stat_dict in self.dataset_statistics.values()]
+        stds = [stat_dict['std'] for stat_dict in self.dataset_statistics.values()]
 
-        ### TODO implement this more like AgentFormer, but try out this 'loose' approach too
-        fragments_per_scene = []
-        self.fragment_list = []
+        # self.overall_mean = np.stack(means).mean(0).mean() # not accounted yet for rotations...
+        # self.overall_std = np.stack(stds).mean(0).mean() # not accounted yet for rotations...
 
-        fragment_id = 0
-        for sc_id, scene in self.scenes.items():
+        self.tokens = ['[BOS]', '[EOS]', '[PAD]', '[TRAJ]', '[MASK]']
+        self.numerical_tokenization = False # REGRESSION TRANSFORMER: CONCURRENT CONDITIONAL GENERATION AND REGRESSION BY BLENDING NUMERICAL AND TEXTUAL TOKENS
+
+        if read_from_pickle:
+            import pickle
+            from pickle import Unpickler
+            from helper import TQDMBytesReader
+            store_path = SEP.join(['TrajectoryPrediction', 'LTCFP_new', 'Datamodules', f'dataset_{split}_whole_{data_format}_seq{self.seq_length}.pickle'])
+            print(f'Loading {split} dataset from pickle ({store_path})...')
+            with open(store_path, 'rb') as handle:
+                total = os.path.getsize(store_path)
+                # self.sequence_list = pickle.load(handle)
+                with TQDMBytesReader(handle, total=total) as pbhandle:
+                    self.sequence_list =  Unpickler(pbhandle).load()
+                print(f'Loaded {split} dataset!')
+            if OPSYS=='Linux':
+                for item in self.sequence_list:
+                    path_tokens = item['scene_path'].split('\\')
+                    path_tokens = [PREFIX]+path_tokens[1:]
+                    item['scene_path'] = SEP.join(path_tokens) 
+        elif self.data_format == 'by_frame':
+            self.read_by_frame_trajectory_loader()
+        elif self.data_format == 'random':
+            self.read_by_random_trajectory_loader()
+
+        MAX_BATCH = 3000
+        if MAX_BATCH:
+            # print('S')
+            sequence_list = []
+            for item in tqdm(self.sequence_list, desc=f'[Chunking batches to maximum {MAX_BATCH} sequence length]...'):
+                num_sequences = len(item['batch_of_sequences'])
+                if num_sequences <= MAX_BATCH:
+                    sequence_list += [item]
+                else:
+                    sequences_per_scene = []
+                    for x in range(0, num_sequences, MAX_BATCH):
+                        sequences_per_scene += [item['batch_of_sequences'][x:x+MAX_BATCH]]
+                    for sequence_chunk in sequences_per_scene:
+                        sequence_list += [{
+                            'batch_of_sequences': sequence_chunk,
+                            'scene_path': item['scene_path']
+                        }]
+            self.sequence_list = sequence_list
+
+            # self.sequence_list += [{
+            #     'batch_of_sequences': sequences_per_scene[x:x+MAX_BATCH],
+            #     'scene_path': scene.RGB_image_path,
+            #     'scene_data': {
+            #         'scene_id': sc_id,
+            #         # 'image_res_x': scene.image_res_x,
+            #         # 'image_res_y': scene.image_res_y,
+            #         # 'floorplan_min_x': scene.floorplan_min_x,
+            #         # 'floorplan_min_y': scene.floorplan_min_y,
+            #         # 'floorplan_max_x': scene.floorplan_max_x,
+            #         # 'floorplan_max_y': scene.floorplan_max_y,
+            #         },
+            #     'type': 'pos',
+            #     } for x in range(0, len(self.sequence_list), MAX_BATCH)]
+
+
+    def read_by_frame_trajectory_loader(self):
+        # Based on SoPhie
+        seq_list_pos = []
+        seq_list_vel = []
+        self.sequence_list = []
+        considered_peds_per_scene = []
+        total_num_sequences = 0
+
+        self.statistics_per_scene = {}
+
+        for sc_id, scene in tqdm(self.scenes.items(), desc=f'[stage=={self.split}]\tPreprocessing trajectories...'):
+            raw_pixel_data = scene.raw_pixel_data.to_numpy(dtype=object)
+
+            frames = np.unique(raw_pixel_data[:, 0]).tolist()
+            frame_data = [raw_pixel_data[frame == raw_pixel_data[:, 0], :] for frame in frames] # restructure data into list with frame indices
+            # quick check whether loaded correctly
+            assert raw_pixel_data.shape[0] == sum([frame_datum.shape[0] for frame_datum in frame_data])
+            num_sequences = max(frames) - self.seq_length + 1
+
+            trajectory_data = {'x': [], 'y': []}
+            considered_peds_per_frame = []
+
+            for frame_idx in range(0, num_sequences + 1):
+                curr_seq_data = np.concatenate(frame_data[frame_idx:frame_idx + self.seq_length], axis=0)
+                agents_in_curr_seq = np.unique(curr_seq_data[:, 1])
+
+                agent_data_per_frame = []
+                # considered_peds_per_frame = []
+
+                num_agents_considered = 0
+                # Iterate over all pedestrians in current sequence (sequence = observed + predicted frames)
+                for _, agent_id in enumerate(agents_in_curr_seq):
+                    seq_data_per_agent = curr_seq_data[curr_seq_data[:, 1] == agent_id, :]
+                    # seq_data_per_agent = np.around(seq_data_per_agent, decimals=4)
+                    # Get start and end frames of pedestrians within current sequence
+                    first_frame_in_seq = frames.index(seq_data_per_agent[0, 0]) - frame_idx
+                    last_frame_in_seq = frames.index(seq_data_per_agent[-1, 0]) - frame_idx + 1
+                    if last_frame_in_seq - first_frame_in_seq != self.seq_length:
+                        # Ignore pedestrians that are not present throughout current sequence length
+                        continue
+                    # agent_data_per_frame.append(seq_data_per_agent)
+                    agent_traj_data = np.array(seq_data_per_agent[:, -2:], dtype=np.float32)
+
+                    # apply mean shift and std
+                    # if self.traj_quantity == 'pos':
+                    #     agent_traj_data = (agent_traj_data - self.overall_mean) / self.overall_std
+                    
+                    if self.traj_quantity == 'pos':
+                        agent_data_per_frame.append({
+                            'abs_pixel_coord': agent_traj_data
+                        })
+                        trajectory_data['x'].append(np.array(seq_data_per_agent[:, -2]).astype(np.float32))
+                        trajectory_data['y'].append(np.array(seq_data_per_agent[:, -1]).astype(np.float32))
+                    elif self.traj_quantity == 'vel':
+                        seq_vel_per_agent = np.zeros(agent_traj_data.shape)
+                        seq_vel_per_agent[0, :] = agent_traj_data[0, :]
+                        # TODO prepend zeros somewhere?
+                        seq_vel_per_agent[1:, :] = agent_traj_data[1:, :] - agent_traj_data[:-1, :]
+
+                        agent_data_per_frame.append({
+                            'abs_pixel_coord': seq_vel_per_agent
+                        })
+                        trajectory_data['x'].append(np.array(seq_vel_per_agent[1:, -2]).astype(np.float32))
+                        trajectory_data['y'].append(np.array(seq_vel_per_agent[1:, -1]).astype(np.float32))
+
+                    # seq_pos_per_agent = np.transpose(seq_data_per_agent[:, 2:]) # np.array 2x20: (x, y)
+                    # seq_vel_per_agent = np.zeros(seq_pos_per_agent.shape)
+                    # # Get relative position changes by subtracting previous from subsequent locations
+                    # seq_vel_per_agent[:, 1:] = seq_pos_per_agent[:, 1:] - seq_pos_per_agent[:, :-1]
+                    # curr_seq_pos[num_agents_considered, :, first_frame_in_seq:last_frame_in_seq] = seq_pos_per_agent # curr_seq = np.array: (num_ped_in_curr_seq, 2, len_seq) == coord trajectories of considered pedestrians
+                    # curr_seq_vel[num_agents_considered, :, first_frame_in_seq:last_frame_in_seq] = seq_vel_per_agent
+                    num_agents_considered += 1
+                    total_num_sequences += 1
+                considered_peds_per_frame.append(num_agents_considered)
+
+                if len(agent_data_per_frame) > 0:
+                    self.sequence_list += [{
+                        'batch_of_sequences': agent_data_per_frame,
+                        'scene_path': scene.RGB_image_path,
+                        'scene_data': {
+                            'scene_id': sc_id,
+                            # 'image_res_x': scene.image_res_x,
+                            # 'image_res_y': scene.image_res_y,
+                            # 'floorplan_min_x': scene.floorplan_min_x,
+                            # 'floorplan_min_y': scene.floorplan_min_y,
+                            # 'floorplan_max_x': scene.floorplan_max_x,
+                            # 'floorplan_max_y': scene.floorplan_max_y,
+                            },
+                        'type': self.traj_quantity
+                    }]
+            # Calculate mean and std per x & y per scene
+            statistics_in_scene = {}
+            for key, arrays_list in trajectory_data.items():
+                traj_data = np.concatenate(arrays_list, axis=0)
+                mean = traj_data.mean()
+                std = traj_data.std()
+                statistics_in_scene.update({key: {'mean': mean, 'std': std}})
+            
+            self.statistics_per_scene.update({scene.RGB_image_path.split(SEP)[-1]: statistics_in_scene})
+        
+            considered_peds_per_scene.append(considered_peds_per_frame)
+        # considered_peds.append(considered_peds_per_scene)
+        if self.dataset_limit != None: 
+            self.sequence_list = self.sequence_list[:self.dataset_limit]
+    
+    
+    def read_by_random_trajectory_loader(self):
+        """ Based on Goal-SAR """
+        sequences_per_scene = []
+        self.sequence_list = []
+
+        sequence_id = 0
+        for sc_id, scene in tqdm(self.scenes.items(), desc=f'[stage=={self.split}]\tPreprocessing trajectories...'):
             raw_pixel_data = scene.raw_pixel_data
 
-            fragments_per_scene = []
+            sequences_per_scene = []
             for agent_i in set(raw_pixel_data.agent_id):
                 raw_agent_data = raw_pixel_data[raw_pixel_data.agent_id == agent_i]
                 # downsample frame rate happens here, at the single agent level
@@ -76,149 +285,76 @@ class Dataset_Seq2Seq(Dataset):
                     if len(candidate_traj) == self.seq_length:
                         if is_legitimate_traj(candidate_traj, step=1):
 
-                            fragments_per_scene.append({
-                                'fragemet_id': fragment_id,
-                                'abs_pixel_coord': np.array(candidate_traj[["x_coord", "y_coord"]].values).astype(np.float32)
-                                # 'starting_frame': candidate_traj.frame_id.iloc[0],
-                                # 'agent_id': candidate_traj.agent_id.iloc[0],
-                            })
+                            agent_traj = np.array(candidate_traj[["x_coord", "y_coord"]].values, dtype=np.float32)
+                            
+                            # # apply mean shift and std
+                            # if self.traj_quantity == 'pos':
+                            #     agent_traj = (agent_traj - self.overall_mean) / self.overall_std
 
-                            fragment_id += 1
+                            if self.traj_quantity=='pos':
+                                agent_seq_data = agent_traj
+                            elif self.traj_quantity=='vel':
+                                agent_seq_data = np.zeros_like(agent_traj)
+                                agent_seq_data[0, :] = agent_traj[0, :]
+                                # TODO prepend zeros somewhere?
+                                agent_seq_data[1:, :] = agent_traj[1:, :] - agent_traj[:-1, :]
+                            else:
+                                raise NotImplementedError
 
-            random.shuffle(fragments_per_scene)
+                            sequences_per_scene.append(agent_seq_data)
 
-            self.fragment_list += [{
-                'batch_of_fragments': fragments_per_scene[x:x+batch_size],
+                            sequence_id += 1
+
+            random.shuffle(sequences_per_scene)
+
+            self.sequence_list += [{
+                'batch_of_sequences': sequences_per_scene,
+                'scene_path': scene.RGB_image_path,
+                }]
+
+            """ self.sequence_list += [{
+                'batch_of_sequences': sequences_per_scene[x:x+self.batch_size],
                 'scene_path': scene.RGB_image_path,
                 'scene_data': {
                     'scene_id': sc_id,
-                    'image_res_x': scene.image_res_x,
-                    'image_res_y': scene.image_res_y,
-                    'floorplan_min_x': scene.floorplan_min_x,
-                    'floorplan_min_y': scene.floorplan_min_y,
-                    'floorplan_max_x': scene.floorplan_max_x,
-                    'floorplan_max_y': scene.floorplan_max_y
-                    }
-                } for x in range(0, len(fragments_per_scene), batch_size)]
+                    # 'image_res_x': scene.image_res_x,
+                    # 'image_res_y': scene.image_res_y,
+                    # 'floorplan_min_x': scene.floorplan_min_x,
+                    # 'floorplan_min_y': scene.floorplan_min_y,
+                    # 'floorplan_max_x': scene.floorplan_max_x,
+                    # 'floorplan_max_y': scene.floorplan_max_y,
+                    },
+                'type': 'pos',
+                } for x in range(0, len(sequences_per_scene), self.batch_size)] """
 
-        self.fragment_list = self.fragment_list[:2]
+        if self.dataset_limit != None: 
+            self.sequence_list = self.sequence_list[:self.dataset_limit]
+
 
     def __len__(self):
-        return len(self.fragment_list)
+        return len(self.sequence_list)
 
-    def augment_traj_and_create_traj_maps(self, batch_data, np_image, augmentation):
 
-        image = np_image
-        abs_pixel_coord = batch_data["abs_pixel_coord"]
-        # input_traj_maps = batch_data["input_traj_maps"]
-        site_x = batch_data['scene_data']['floorplan_max_x']
-        site_y = batch_data['scene_data']['floorplan_max_y']
+    def augment_traj_and_images_sparse(self, trajectories, np_image, augmentation):
 
-        scale_x = site_x / self.max_floorplan_meters
-        scale_y = site_y / self.max_floorplan_meters
+        keypoints = list(map(tuple, trajectories.reshape(-1, 2)))
 
-        assert 0.0 <= scale_x <= 1.0 and 0.0 <= scale_y <= 1.0
-
-        scaled_resolution_x = int(self.final_resolution * scale_x)
-        scaled_resolution_y = int(self.final_resolution * scale_y)
-
-        # get old channels for safety checking
-        old_H, old_W, C = np_image.shape
-
-        # keypoints to list of tuples
-        # need to clamp because some slightly exit from the image
-        # abs_pixel_coord[:, 0] = np.clip(abs_pixel_coord[:, 0],
-        #                                    a_min=0, a_max=old_W - 1e-3)
-        # abs_pixel_coord[:, 1] = np.clip(abs_pixel_coord[:, 1],
-        #                                    a_min=0, a_max=old_H - 1e-3)
-        # Check whether some keypoints are outside the image
-        x_coord_big = np.argwhere(abs_pixel_coord[:, :, 0] > old_W)
-        y_coord_big = np.argwhere(abs_pixel_coord[:, :, 1] > old_H)
-        x_coord_small = np.argwhere(abs_pixel_coord[:, :, 0] < 0)
-        y_coord_small = np.argwhere(abs_pixel_coord[:, :, 1] < 0)
-
-        assert x_coord_big.shape[0] == y_coord_big.shape[0] == x_coord_small.shape[0] == y_coord_small.shape[0] == 0, \
-            f'Some traj points not within image, outside shapes: {x_coord_big.shape[0]}, {y_coord_big.shape[0]}, {x_coord_small.shape[0]} and {y_coord_small.shape[0]}'
-
-        keypoints = list(map(tuple, abs_pixel_coord.reshape(-1, 2)))
-
-        # Resize first to create Gaussian maps later
+        # flipping, transposing, random 90 deg rotations
         transform = A.Compose([
-            A.augmentations.geometric.resize.Resize(scaled_resolution_y, scaled_resolution_x, interpolation=cv2.INTER_AREA),
-        ],
-            keypoint_params=A.KeypointParams(format='xy',
-                                            remove_invisible=False))
-        
-        transformed = transform(image=image, keypoints=keypoints)
-        image = transformed['image']
-        keypoints = np.array(transformed['keypoints'])
-        
-        input_traj_maps = create_CNN_inputs_loop(
-            batch_abs_pixel_coords=torch.tensor(keypoints.reshape(self.seq_length, -1, 2)).float(),
-            tensor_image=F.to_tensor(image))
-        bs, T, old_H, old_W = input_traj_maps.shape
-        input_traj_maps = input_traj_maps.view(bs * T, old_H, old_W).\
-            permute(1, 2, 0).numpy().astype('float32')
-
-        if augmentation:
-            transform = A.Compose([
-                # SAFE AUGS, flips and 90rots
-                # A.augmentations.geometric.resize.Resize(scaled_resolution_y, scaled_resolution_x, interpolation=cv2.INTER_AREA),
-                A.augmentations.transforms.HorizontalFlip(p=0.5),
-                A.augmentations.transforms.VerticalFlip(p=0.5),
-                A.augmentations.transforms.Transpose(p=0.5),
-                A.augmentations.geometric.rotate.RandomRotate90(p=1.0),
-                A.augmentations.transforms.PadIfNeeded(min_height=self.final_resolution, min_width=self.final_resolution, border_mode=cv2.BORDER_CONSTANT, value=[0., 0., 0.]),
-                # TODO implement continuous rotations from within [0;360] at some point, maybe change the transform order for that
-                # in that case watch out for cases when image extends the image borders by a few pixels after rotation
-                A.augmentations.geometric.rotate.Rotate(limit=45, interpolation=cv2.INTER_AREA, border_mode=cv2.BORDER_CONSTANT, value=0, p=1.0),
-
-                # # HIGH RISKS - HIGH PROBABILITY OF KEYPOINTS GOING OUT
-                # A.OneOf([  # perspective or shear
-                #     A.augmentations.geometric.transforms.Perspective(
-                #         scale=0.05, pad_mode=cv2.BORDER_CONSTANT, p=1.0),
-                #     A.augmentations.geometric.transforms.Affine(
-                #         shear=(-10, 10), mode=cv2.BORDER_CONSTANT, p=1.0),  # shear
-                # ], p=0.2),
-
-                # A.OneOf([  # translate
-                #     A.augmentations.geometric.transforms.ShiftScaleRotate(
-                #         shift_limit_x=0.01, shift_limit_y=0, scale_limit=0,
-                #         rotate_limit=0, border_mode=cv2.BORDER_CONSTANT,
-                #         p=1.0),  # x translations
-                #     A.augmentations.geometric.transforms.ShiftScaleRotate(
-                #         shift_limit_x=0, shift_limit_y=0.01, scale_limit=0,
-                #         rotate_limit=0, border_mode=cv2.BORDER_CONSTANT,
-                #         p=1.0),  # y translations
-                #     A.augmentations.geometric.transforms.Affine(
-                #         translate_percent=(0, 0.01),
-                #         mode=cv2.BORDER_CONSTANT, p=1.0),  # random xy translate
-                # ], p=0.2),
-                # # random rotation
-                # A.augmentations.geometric.rotate.Rotate(
-                #     limit=10, border_mode=cv2.BORDER_CONSTANT,
-                #     p=0.4),
+            A.augmentations.geometric.transforms.HorizontalFlip(p=0.5),
+            A.augmentations.geometric.transforms.VerticalFlip(p=0.5),
+            A.augmentations.geometric.transforms.Transpose(p=0.5),
+            A.augmentations.geometric.rotate.RandomRotate90(p=0.5),
             ],
-                keypoint_params=A.KeypointParams(format='xy',
-                                                remove_invisible=False),
-                additional_targets={'traj_map': 'image'},
-            )
-        else:
-            transform = A.Compose([
-                # A.augmentations.geometric.resize.Resize(scaled_resolution_y, scaled_resolution_x, interpolation=cv2.INTER_AREA),
-                A.augmentations.transforms.PadIfNeeded(min_height=self.final_resolution, min_width=self.final_resolution, border_mode=cv2.BORDER_CONSTANT, value=[0., 0., 0.]),
-            ],
-                keypoint_params=A.KeypointParams(format='xy',
-                                                remove_invisible=False),
-                additional_targets={'traj_map': 'image'},
-            )
+            keypoint_params=A.KeypointParams(format='xy', remove_invisible=False))
 
         #################### TEST START ####################
-        # plt.imshow(image/255.) # weg
-        # img_np = image#/255.
+        # from skimage.draw import line
+        # # plt.imshow(np_image) # weg
         # traj = np.array(keypoints)
+        # np_image_draw = np_image.copy()
         # # traj = [t for t in traj]
-        # trajs = [traj[x:x+20] for x in range(0, len(traj), 20)]
+        # trajs = [traj[x:x+self.seq_length] for x in range(0, len(traj), self.seq_length)]
         # # for t_id in traj:
         # for traj in trajs:
         #     old_point = None
@@ -226,96 +362,77 @@ class Dataset_Seq2Seq(Dataset):
         #     b_val = random.uniform(0.7, 1.0)
         #     for point in traj:
         #         x_n, y_n = round(point[0]), round(point[1])
-        #         assert 0 <= x_n <= img_np.shape[1] and 0 <= y_n <= img_np.shape[0], f'{x_n} > {img_np.shape[1]} or {y_n} > {img_np.shape[0]}'
+        #         assert 0 <= x_n <= np_image.shape[1] and 0 <= y_n <= np_image.shape[0], f'{x_n} > {np_image.shape[1]} or {y_n} > {np_image.shape[0]}'
         #         if old_point != None:
         #             # cv2.line(img_np, (old_point[1], old_point[0]), (y_n, x_n), (0, 1.,0 ), thickness=5)
         #             c_line = [coord for coord in zip(*line(*(old_point[0], old_point[1]), *(x_n, y_n)))]
         #             for c in c_line:
-        #                 img_np[c[1], c[0]] = np.array([r_val, 0., b_val])
+        #                 np_image_draw[c[1], c[0]] = np.array([r_val, 0., b_val])
         #             # plt.imshow(img_np)
         #         old_point = (x_n, y_n)
 
-        # plt.imshow(img_np)
+        # plt.imshow(np_image_draw)
         # plt.close('all')
         #################### TEST END ####################
+        
+        transformed = transform(image=np_image, keypoints=keypoints)
+        
+        transformed_trajectories = np.array(transformed['keypoints'])
+        # apply mean shift and std
+        if self.traj_quantity == 'pos' and self.normalize_dataset:
+            transformed_trajectories = (transformed_trajectories - self.overall_mean) / self.overall_std
 
-        transformed = transform(
-            image=image, keypoints=keypoints, traj_map=input_traj_maps)
         # #################### TEST START ####################
-        # plt.imshow(image/255.) # weg
-        # img_np = transformed['image']#/255.
+        # from skimage.draw import line
+        # np_image_draw = transformed['image']#/255.
 
-        traj = np.array(transformed['keypoints'])
-        trajs = [traj[x:x+20] for x in range(0, len(traj), 20)]
-        # for t_id in traj:
+        # traj = np.array(transformed['keypoints'])
+        # trajs = [traj[x:x+self.seq_length] for x in range(0, len(traj), self.seq_length)]
+        # # for t_id in traj:
         # for traj in trajs:
         #     old_point = None
         #     r_val = random.uniform(0.4, 1.0)
         #     b_val = random.uniform(0.7, 1.0)
         #     for point in traj:
         #         x_n, y_n = round(point[0]), round(point[1])
-        #         assert 0 <= x_n <= img_np.shape[1] and 0 <= y_n <= img_np.shape[0]
+        #         # assert 0 <= x_n <= np_image_draw.shape[1] and 0 <= y_n <= np_image_draw.shape[0]
         #         if old_point != None:
         #             # cv2.line(img_np, (old_point[1], old_point[0]), (y_n, x_n), (0, 1.,0 ), thickness=5)
         #             c_line = [coord for coord in zip(*line(*(old_point[0], old_point[1]), *(x_n, y_n)))]
         #             for c in c_line:
-        #                 img_np[c[1], c[0]] = np.array([r_val, 0., b_val])
+        #                 np_image_draw[c[1], c[0]] = np.array([r_val, 0., b_val])
         #             # plt.imshow(img_np)
 
-        #     old_point = (x_n, y_n)
-        # # cv2.imshow('namey', img_np)
-        # plt.imshow(img_np)
+        #         old_point = (x_n, y_n)
+        #     # cv2.imshow('namey', img_np)
+        # plt.imshow(np_image_draw)
         # plt.close('all')
         # #################### TEST END ####################
-        # FROM NUMPY BACK TO TENSOR
-        image = torch.tensor(transformed['image']).permute(2, 0, 1)
-        C, new_H, new_W = image.shape
-        abs_pixel_coord = torch.tensor(transformed['keypoints']).view(batch_data["abs_pixel_coord"].shape)
-        input_traj_maps = torch.tensor(transformed['traj_map']).permute(2, 0, 1).view(bs, T, new_H, new_W)
 
-        # Check whether some keypoints are outside the image
-        x_coord_big = torch.argwhere(abs_pixel_coord[:, :, 0] > new_W)
-        y_coord_big = torch.argwhere(abs_pixel_coord[:, :, 1] > new_H)
-        x_coord_small = torch.argwhere(abs_pixel_coord[:, :, 0] < 0)
-        y_coord_small = torch.argwhere(abs_pixel_coord[:, :, 1] < 0)
+        image = torch.tensor(transformed['image']).permute(2, 0, 1).float()
+        trajectories_t = torch.tensor(transformed_trajectories).float()
+        trajectories_t = trajectories_t.view(trajectories.shape)
 
-        if not (x_coord_big.size(0) == y_coord_big.size(0) == x_coord_small.size(0) == y_coord_small.size(0) == 0):
-            print('After rotation, some trajectories dont lie within output image. Output shapes: ' + \
-                f'{x_coord_big.size(0)}, {y_coord_big.size(0)}, {x_coord_small.size(0)} and { y_coord_small.size(0)}')
-
-        # Clamping of trajectory values if they exceed the image boundaries (very rare)
-        abs_pixel_coord[:, :, 0] = torch.clamp(abs_pixel_coord[:, :, 0], min=0, max=new_W)
-        abs_pixel_coord[:, :, 1] = torch.clamp(abs_pixel_coord[:, :, 1], min=0, max=new_H)
-
-        assert new_W == self.final_resolution and new_H == self.final_resolution
-
-        # NEW AUGMENTATION: INVERT TIME
-        # if random.random() > 0.5:
-        #     abs_pixel_coord = abs_pixel_coord.flip(dims=(0,))
-        #     input_traj_maps = input_traj_maps.flip(dims=(1,))
-
-        # To torch.tensor.float32
-        batch_data["tensor_image"] = image.float()
-        batch_data["abs_pixel_coord"] = abs_pixel_coord.float()
-        batch_data["input_traj_maps"] = input_traj_maps.float()
-        batch_data["seq_list"] = torch.tensor(batch_data["seq_list"]).float()
-
-        return batch_data
+        return [image, trajectories_t]
 
 
     def __getitem__(self, idx):
         
         # LOAD CSV DATA
-        fragment = self.fragment_list[idx]
+        sequence = self.sequence_list[idx] # 'scene_path': corr_cross\\0__floorplan_siteX_35_siteY_20_CORRWIDTH_3_SIDECORRWIDTH_20_numCross_2\\variation_56\\variation_56_num_agents_15.npz'
 
-        abs_pixel_coord = np.moveaxis(np.stack([frag_coord['abs_pixel_coord'] for frag_coord in fragment['batch_of_fragments']], axis=0), 0, 1)
 
-        seq_list =  np.ones((abs_pixel_coord.shape[0], abs_pixel_coord.shape[1]))
+        # abs_pixel_coord = np.moveaxis(np.stack([frag_coord['abs_pixel_coord'] for frag_coord in sequence['batch_of_sequences']], axis=0), 0, 1)
+        # abs_pixel_coord = np.stack([frag_coord['abs_pixel_coord'] for frag_coord in sequence['batch_of_sequences']], axis=0)
+        abs_pixel_coord = np.stack(sequence['batch_of_sequences'], axis=0)
 
-        # tensor_image, [scale_x, scale_y, rotation_angle, h_flip, v_flip] = self.image_and_traj_preprocessing(fragment['scene_path'], fragment['abs_pixel_coord'])
+        # tensor_image, [scale_x, scale_y, rotation_angle, h_flip, v_flip] = self.image_and_traj_preprocessing(sequence['scene_path'], sequence['abs_pixel_coord'])
         
         # to get a clear image, convert to bool first to get rid of values betweet 1 and 254 (all stored as 1)
-        np_image = np.array(h5py.File(fragment['scene_path'], 'r').get('img')).astype(bool).astype(np.float32)
+        # np_image = np.array(h5py.File(sequence['scene_path'], 'r').get('img')).astype(bool).astype(np.float32)
+        np_image = sparse.load_npz(sequence['scene_path']).todense()
+        np_image = np_image.astype(np.float32) / 255.
+        # TODO only way with this dataset for quick float 0. - 1. conversion, but light or dark area do not matter at all, only [1 0 0] or [0 1 0]
 
         # input_traj_maps = create_CNN_inputs_loop(
         #     batch_abs_pixel_coords=torch.tensor(np.moveaxis(abs_pixel_coord, 0, 1)).float(),
@@ -323,11 +440,13 @@ class Dataset_Seq2Seq(Dataset):
 
         batch_data = {
             'abs_pixel_coord': abs_pixel_coord,
-            'scene_data': fragment['scene_data'],
-            'seq_list': seq_list
         }
 
         warnings.filterwarnings("ignore")
-        batch_data = self.augment_traj_and_create_traj_maps(batch_data, np_image, self.data_augmentation)
+        # batch_data = self.augment_traj_and_create_traj_maps(batch_data, np_image, self.data_augmentation)
+        batch_data = self.augment_traj_and_images_sparse(batch_data['abs_pixel_coord'], np_image, self.data_augmentation)
+
+        if self.transforms:
+            batch_data[0] = self.transforms(batch_data[0])
         
         return batch_data

@@ -22,9 +22,9 @@ from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 
 # python train_individualTF.py --dataset_name eth --name eth --max_epoch 240 --batch_size 100 --name eth_train --factor 1
-CUDA_DEVICE = 0
+CUDA_DEVICE = 1
 do_floorplans = True
-train = False
+train = True
 inference = True
 
 parser=argparse.ArgumentParser(description='Train the individual Transformer model')
@@ -135,14 +135,14 @@ optim = NoamOpt(args.emb_size, args.factor, len(tr_dl)*args.warmup,
 #optim=Adagrad(list(a.parameters())+list(model.parameters())+list(generator.parameters()),lr=0.01,lr_decay=0.001)
 epoch=0
 
-
+# train_dataset[:]['src']/['trg'] are obs/pred trajectories in corresponding frames
 #mean=train_dataset[:]['src'][:,1:,2:4].mean((0,1))
 mean=torch.cat((train_dataset[:]['src'][:,1:,2:4],train_dataset[:]['trg'][:,:,2:4]),1).mean((0,1))
 #std=train_dataset[:]['src'][:,1:,2:4].std((0,1))
 std=torch.cat((train_dataset[:]['src'][:,1:,2:4],train_dataset[:]['trg'][:,:,2:4]),1).std((0,1))
 means=[]
 stds=[]
-# Extract different means and stds for different scenes
+# Extract different means and stds over VELOCITIES for different scenes over both 'src' (obs) and 'trg' (pred) trajectories
 for i in np.unique(train_dataset[:]['dataset']):
     ind=train_dataset[:]['dataset']==i
     means.append(torch.cat((train_dataset[:]['src'][ind, 1:, 2:4], train_dataset[:]['trg'][ind, :, 2:4]), 1).mean((0, 1))) # concat obs (except present) and future trajectories, mean over all sequences and timesteps-per-sequence in one scene/layout in the train dataset
@@ -156,9 +156,9 @@ scipy.io.savemat(os.path.join(file_dir, 'models', 'Individual', f'{args.name}', 
 
 if inference:
 
-    model_path = os.path.join('TrajectoryPrediction\\TF4TrajectoryForecasting\\models\\Individual', args.name)
-    pth_filename = sorted([filename for filename in os.listdir(model_path) if filename.endswith('.pth')], key=lambda x: int(x.replace('.pth', '')))[-1]
-    model.load_state_dict(torch.load(os.path.join(model_path, pth_filename)))
+    # model_path = os.path.join('TrajectoryPrediction\\TF4TrajectoryForecasting\\models\\Individual', args.name)
+    # pth_filename = sorted([filename for filename in os.listdir(model_path) if filename.endswith('.pth')], key=lambda x: int(x.replace('.pth', '')))[-1]
+    # model.load_state_dict(torch.load(os.path.join(model_path, pth_filename)))
 
     model.eval()
     gt = []
@@ -189,7 +189,7 @@ if inference:
         for i in range(args.preds):
             trg_att = subsequent_mask(dec_inp.shape[1]).repeat(dec_inp.shape[0], 1, 1).to(device)
             out = model(inp, dec_inp, src_att, trg_att) # MODEL INPUT: (100, 7, 2), (100, 1, 3), (100, 1, 7) -> ones mask, (100, 1, 1) -> true mask # OUT: (100, 1, 3)
-            dec_inp=torch.cat((dec_inp,out[:,-1:,:]),1)
+            dec_inp=torch.cat((dec_inp,out[:,-1:,:]),1) # prediction is fed as input, only last state appended: https://towardsdatascience.com/transformers-explained-visually-part-1-overview-of-functionality-95a6dd460452
 
         preds_tr_b=(dec_inp[:,1:,0:2]*std.to(device)+mean.to(device)).detach().cpu().numpy().cumsum(1)+batch['src'][:,-1:,0:2].cpu().numpy()
         pr.append(preds_tr_b)
@@ -288,7 +288,7 @@ if train:
         for id_b,batch in enumerate(tr_dl):
             pbar.update(1)
             optim.optimizer.zero_grad()
-            inp=(batch['src'][:,1:,2:4].to(device)-mean.to(device))/std.to(device) # OUT: (100, 7, 2) -> 100 peds from different scenes, 7 (past) observed 2D normalized velocities (except first one which is the present one)
+            inp=(batch['src'][:,1:,2:4].to(device)-mean.to(device))/std.to(device) # OUT: (100, 7, 2) -> 100 peds from different scenes, 7 (past) observed 2D normalized VELOCITIES (except first one which is the present one), mean & std over all scenes
             target=(batch['trg'][:,:-1,2:4].to(device)-mean.to(device))/std.to(device) # OUT: (100, 11, 2) -> 100 peds from different scenes, 11 future 2D normalized velocites (except last one)
             target_c=torch.zeros((target.shape[0],target.shape[1],1)).to(device) # OUT: zeros (100, 11, 1)
             target=torch.cat((target,target_c),-1)
@@ -300,7 +300,7 @@ if train:
             trg_att=subsequent_mask(dec_inp.shape[1]).repeat(dec_inp.shape[0],1,1).to(device)
 
 
-            pred=model(inp, dec_inp, src_att, trg_att)
+            pred=model(inp, dec_inp, src_att, trg_att) #  input dec_input: (100, 12, 3) --> teacher forcing, train pred based on targets/ground truth
             # Pairwise distance from normalized (pred-GT) velocities
             loss = F.pairwise_distance(pred[:, :,0:2].contiguous().view(-1, 2),
                                         ((batch['trg'][:, :, 2:4].to(device)-mean.to(device))/std.to(device)).contiguous().view(-1, 2).to(device)).mean() + torch.mean(torch.abs(pred[:,:,2]))

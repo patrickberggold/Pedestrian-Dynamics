@@ -6,6 +6,7 @@ from collections import OrderedDict
 import numpy as np
 from PIL import Image
 import h5py
+import sparse
 
 class Scene_floorplan():
     def __init__(self, img_path, csv_path, verbose=False):
@@ -23,10 +24,10 @@ class Scene_floorplan():
             'y_coord',
         ]
         self.column_dtype = {
-            'frame_id': float,
+            'frame_id': np.float32,
             'agent_id': int,
-            'x_coord': float,
-            'y_coord': float,
+            'x_coord': np.float32,
+            'y_coord': np.float32,
         }
 
         # semantic classes
@@ -46,7 +47,6 @@ class Scene_floorplan():
 
         # self.load_scene_all(verbose)
         self.delta_time = 1 / self.frames_per_second
-        RGB_image = self._load_RGB_image()
         # self.semantic_map_pred = self._load_rec_img()
         # import matplotlib.pyplot as plt
         # plt.imshow(self.RGB_image)
@@ -64,10 +64,12 @@ class Scene_floorplan():
             self.floorplan_max_x += 0.15
             self.floorplan_max_y += 0.15
 
-        self.image_res_x = RGB_image.shape[1]
-        self.image_res_y = RGB_image.shape[0]
+        # RGB_image = self._load_RGB_image()
+        # self.image_res_x = 640 # RGB_image.shape[1]
+        # self.image_res_y = 640 # RGB_image.shape[0]
 
-        self.raw_pixel_data = self._make_pixel_coord_pandas(self._load_raw_data_table(self.raw_scene_data_path))
+        # self.raw_pixel_data = self._make_pixel_coord_pandas(self._load_raw_data_table(self.raw_scene_data_path))
+        self.raw_pixel_data = self._load_raw_data_table(self.raw_scene_data_path)
 
     def _load_RGB_image(self):
         if self.RGB_image_path.endswith('.jpeg') or self.RGB_image_path.endswith('.jpg'):
@@ -75,6 +77,10 @@ class Scene_floorplan():
                 image = np.asarray(f)
         elif self.RGB_image_path.endswith('.h5'):
             image = np.array(h5py.File(self.RGB_image_path, 'r').get('img'))
+        elif self.RGB_image_path.endswith('.npz'):
+            image = sparse.load_npz(self.RGB_image_path).todense()
+            image = image.astype(np.float32) #/ 255.
+            image = np.clip(image, 0.0, 1.0)
         else:
             raise NotImplementedError
         return image

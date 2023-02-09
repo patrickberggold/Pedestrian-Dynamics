@@ -11,3 +11,4 @@ Image2Image/Optimization/*
 *.pt
 *.mat
 *.pkl
+*pickle
