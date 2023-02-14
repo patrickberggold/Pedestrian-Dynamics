@@ -10,6 +10,8 @@ from einops import rearrange, repeat
 from .img_backbone import ImgBackbonePretrained
 from .vit import SimpleViT, Extractor
 
+import time
+
 # helper functions
 
 def exists(val):
@@ -297,7 +299,7 @@ class CrossAttention(nn.Module):
 class CoCa4Traj(nn.Module):
     def __init__(
         self,
-        *,
+        config,
         dim,
         num_tokens,
         unimodal_depth,
@@ -309,11 +311,8 @@ class CoCa4Traj(nn.Module):
         ff_mult=4,
         caption_loss_weight=1.,
         contrastive_loss_weight=1.,
-        pad_id=0,
         forTraj=False,
         use_contrastive_loss=True,
-        normalize_dataset=True,
-        img_arch = 'BeIT'
     ):
         # TODO: 
         # - compare with/without caption loss
@@ -328,14 +327,18 @@ class CoCa4Traj(nn.Module):
         super().__init__()
         self.dim = dim
 
-        self.num_obs_steps = 8
         self.ds_mean = 320
         self.ds_std = 75
+        self.num_obs_steps = config['num_obs_steps']
 
-        self.pad_id = pad_id
-        self.normalize_dataset = normalize_dataset 
+        # token embeddings
+        self.forTraj = forTraj
+        self.pad_id = 0
+        self.check_for_fill = torch.isinf
+
         self.use_contrastive_loss = use_contrastive_loss
-        self.img_arch = img_arch
+        self.normalize_dataset = config['normalize_dataset'] 
+        self.img_arch = config['img_arch']
         
         if self.use_contrastive_loss:
             self.caption_loss_weight = caption_loss_weight
@@ -353,16 +356,53 @@ class CoCa4Traj(nn.Module):
             self.img_to_latents = EmbedToLatents(dim, dim_latents)
             self.text_to_latents = EmbedToLatents(dim, dim_latents)
 
-        # token embeddings
-        self.forTraj = forTraj
+            self.text_cls_token = nn.Parameter(torch.randn(dim))
+
 
         if self.forTraj:
             num_tokens = 2
             self.token_emb = nn.Linear(2, dim)
-            self.label_emb = nn.Linear(2, dim)
+
+            dict_size = 6
+            coord_dims = 2
+
+            self.use_tokens = True
+            self.token_emb = TrajectoryEmbedding(coord_dims, dict_size, dim, use_tokens=self.use_tokens)
+            if self.use_tokens:
+                self.to_logits = nn.Sequential(
+                    LayerNorm(dim),
+                    nn.Linear(dim, dict_size+coord_dims, bias=False)
+                )
+
+                # TODO try different output heads --> implement them...
+                # self.to_logits = nn.Sequential(
+                #     LayerNorm(dim),
+                #     nn.ModuleList([
+                #         nn.Linear(dim, dict_size, bias=False),
+                #         nn.Linear(dim, coord_dims, bias=False)
+                #     ])
+                # )
+
+                # self.to_logits[-1][0].weight = self.token_emb.embed_token.weight
+
+            else:
+                self.to_logits = nn.Sequential(
+                    LayerNorm(dim),
+                    nn.Linear(dim, coord_dims, bias=False)
+                )
         else:
+            # for NLP example
+            coord_dims = num_tokens
             self.token_emb = nn.Embedding(num_tokens, dim)
-        self.text_cls_token = nn.Parameter(torch.randn(dim))        
+
+            self.to_logits = nn.Sequential(
+                LayerNorm(dim),
+                nn.Linear(dim, coord_dims, bias=False)
+            )
+
+            # they used embedding weight tied projection out to logits, not common, but works
+            self.to_logits[-1].weight = self.token_emb.weight
+            nn.init.normal_(self.token_emb.weight, std=0.02)
         
         # img_backbone = SimpleViT(
         #     image_size = 256,
@@ -376,16 +416,6 @@ class CoCa4Traj(nn.Module):
         # )
         
         img_backbone = ImgBackbonePretrained(arch=self.img_arch)
-        # from transformers import SegformerForSemanticSegmentation
-        # img_backbone = SegformerForSemanticSegmentation.from_pretrained('nvidia/segformer-b1-finetuned-cityscapes-1024-1024')
-
-        # from transformers import BeitForSemanticSegmentation 
-        # img_backbone = BeitForSemanticSegmentation.from_pretrained('microsoft/beit-base-finetuned-ade-640-640') # [1, 1601, 768]
-        
-        # test_model = img_backbone.to('cuda:0')
-        # img = torch.randn((1,3,1024,1024), device='cuda:0')
-        # out = test_model(img)
-
         image_dim = img_backbone.hidden_size
         
         self.img_encoder = Extractor(img_backbone, return_embeddings_only=True, detach=False)
@@ -422,27 +452,34 @@ class CoCa4Traj(nn.Module):
                 Residual(CrossAttention(dim=dim, dim_head=dim_head, heads=heads, parallel_ff=True, ff_mult=ff_mult))
             ]))
 
-        # to logits
-        self.to_logits = nn.Sequential(
-            LayerNorm(dim),
-            nn.Linear(dim, num_tokens, bias=False)
-        )
-
-        if not self.forTraj:
-            # they used embedding weight tied projection out to logits, not common, but works
-            self.to_logits[-1].weight = self.token_emb.weight
-            nn.init.normal_(self.token_emb.weight, std=0.02)
-        
+        # initialize weights
+        # TODO init all layers over multiple options
+        self.apply(self._initialize_weights)
     
-    def embed_text(self, text):
-        batch, device = text.shape[0], text.device
 
-        seq = text.shape[1]
+    def _initialize_weights(self, m):
+        if hasattr(m, 'weight'):
+            try:
+                nn.init.xavier_normal_(m.weight)
+                # nn.init.normal_(m.weight, std=0.02)
+            except ValueError:
+                # Prevent ValueError("Fan in and fan out can not be computed for tensor with fewer than 2 dimensions")
+                m.weight.data.uniform_(-0.02, 0.02)
+                # print("Bypassing ValueError...")
+        elif hasattr(m, 'bias'):
+            if m.bias is not None:
+                m.bias.data.zero_()
+
+    
+    def embed_text(self, obs, tokens):
+        batch, device = obs.shape[0], obs.device
+
+        seq = obs.shape[1]
 
         # Pad text for testing...
-        if not self.forTraj: text = torch.cat((text[:, :1], torch.zeros((4, 511-1), dtype=int, device='cuda:0')), dim=-1)
+        if not self.forTraj: obs = torch.cat((obs[:, :1], torch.zeros((4, 511-1), dtype=int, device='cuda:0')), dim=-1)
 
-        text_tokens = self.token_emb(text) # [4, 511] --> [4, 511, 512]
+        text_tokens = self.token_emb(obs, tokens) if tokens != None else self.token_emb(obs) # [4, 511] --> [4, 511, 512]
 
         if self.use_contrastive_loss:
 
@@ -456,11 +493,11 @@ class CoCa4Traj(nn.Module):
 
             if self.forTraj:
                 # altogether, the cls token might be useless since we dont want to do classification...
-                cls_mask = text!=self.pad_id 
+                cls_mask = obs!=self.pad_id 
                 cls_mask = torch.logical_or(cls_mask[:,:,0], cls_mask[:,:,1])
                 cls_mask = rearrange(cls_mask, 'b j -> b 1 j') # 15, 1, 8
             else:
-                cls_mask = rearrange(text!=self.pad_id, 'b j -> b 1 j')
+                cls_mask = rearrange(obs!=self.pad_id, 'b j -> b 1 j')
 
             attn_mask = F.pad(cls_mask, (0, 1, seq, 0), value=True) # cls_mask=(4, 1, 511) --> attn_mask=(4, 512, 512)
         else:
@@ -480,10 +517,10 @@ class CoCa4Traj(nn.Module):
             return None, text_tokens
 
 
-    def embed_pred(self, labels):
+    def embed_pred(self, labels, tokens):
         batch, device = labels.shape[0], labels.device
 
-        label_tokens = self.label_emb(labels)
+        label_tokens = self.token_emb(labels, tokens)
          # go through unimodal layers
 
         for attn_ff in self.unimodal_pred_layers:
@@ -491,6 +528,7 @@ class CoCa4Traj(nn.Module):
 
         # get text cls token
         return label_tokens
+
 
     def embed_image(self, images=None, image_tokens=None):
         # encode images into embeddings
@@ -512,67 +550,6 @@ class CoCa4Traj(nn.Module):
 
         return None, img_queries # 1, 256, 512
 
-    def forward_original(
-        self,
-        text,
-        images=None,
-        image_tokens=None,
-        labels=None,
-        return_loss=False,
-        return_embeddings=False,
-        train=True # True implements Teacher Forcing
-    ):
-        batch, device = text.shape[0], text.device
-
-        if return_loss and not exists(labels):
-            text, labels = text[:, :-1], text[:, 1:]
-
-        text_embeds, text_tokens = self.embed_text(text)
-
-        image_embeds, image_tokens = self.embed_image(images=images, image_tokens=image_tokens)
-
-        # return embeddings if that is what the researcher wants
-
-        if return_embeddings:
-            return text_embeds, image_embeds
-
-        # go through multimodal layers
-
-        for attn_ff, cross_attn in self.multimodal_layers:
-            text_tokens = attn_ff(text_tokens)
-            text_tokens = cross_attn(text_tokens, image_tokens)
-
-        logits = self.to_logits(text_tokens)
-
-        if not return_loss:
-            return logits
-
-        # shorthand
-
-        ce = F.cross_entropy
-
-        # calculate caption loss (cross entropy loss)
-
-        logits = rearrange(logits, 'b n c -> b c n')
-        caption_loss = ce(logits, labels, ignore_index=self.pad_id)
-        caption_loss = caption_loss * self.caption_loss_weight
-
-        # embedding to latents
-
-        text_latents = self.text_to_latents(text_embeds)
-        image_latents = self.img_to_latents(image_embeds)
-
-        # calculate contrastive loss
-
-        sim = einsum('i d, j d -> i j', text_latents, image_latents)
-        sim = sim * self.temperature.exp()
-        contrastive_labels = torch.arange(batch, device=device)
-
-        contrastive_loss = (ce(sim, contrastive_labels) + ce(sim.t(), contrastive_labels)) * 0.5
-        contrastive_loss = contrastive_loss * self.contrastive_loss_weight
-
-        return caption_loss + contrastive_loss
-
     
     def forward(
         self,
@@ -581,27 +558,31 @@ class CoCa4Traj(nn.Module):
     ):
         images = batch[0]
         abs_coordinates = batch[1].squeeze(0)
+        tokens = batch[2].squeeze(0) if len(batch)==3 else None
 
         obs = abs_coordinates[:, :self.num_obs_steps]
+        obs_tokens = tokens[:, :self.num_obs_steps] if len(batch)==3 else None
         # train = True
         if decoder_mode==0:
             # teacher forcing
             labels = abs_coordinates[:, self.num_obs_steps:]
+            label_tokens = tokens[:, self.num_obs_steps:] if len(batch)==3 else None
         else:
             labels = obs[:, -1].unsqueeze(1)
+            label_tokens = obs_tokens[:, -1].unsqueeze(1) if len(batch)==3 else None
             # obs = abs_coordinates[:, :7] and label = abs_coordinates[:, 8] ?
 
         batch, device = obs.shape[0], obs.device
         # text de-/encoder
-        obs_embeds, obs_tokens = self.embed_text(obs)
+        obs_embeds, obs_tokens = self.embed_text(obs, obs_tokens)
         # image encoder
         image_embeds, image_tokens = self.embed_image(images=images)
 
         # go through multimodal layers
-        
+
         # teacher forcing
         if decoder_mode==0:
-            label_tokens = self.embed_pred(labels)
+            label_tokens = self.embed_pred(labels, label_tokens)
             for attn_ff, cross_attn, cross_pred_attn in self.multimodal_layers:
                 obs_tokens = attn_ff(obs_tokens, apply_causal_mask=False)
                 obs_tokens = cross_attn(obs_tokens, image_tokens)
@@ -610,6 +591,7 @@ class CoCa4Traj(nn.Module):
 
         # running free
         else:
+            raise NotImplementedError
             dec_input = labels
             for i in range(abs_coordinates[:, self.num_obs_steps:].size(1)):
 
@@ -634,6 +616,7 @@ class CoCa4Traj(nn.Module):
     def compute_loss(self, prediction, batch, stage):
 
         labels = batch[1].squeeze(0)[:, self.num_obs_steps:]
+        label_tokens = batch[2].squeeze(0)[:, self.num_obs_steps:] if len(batch)==3 else None
 
         if self.use_contrastive_loss:
             logits, obs_embeds, image_embeds = prediction
@@ -662,19 +645,82 @@ class CoCa4Traj(nn.Module):
             return total_loss, {'MSE_total': total_loss.item(), 'MSE_caption': caption_loss.item()}, None
 
         else:
-            prediction = prediction[0].squeeze()
-            caption_loss = F.mse_loss(prediction, labels)
-            # TODO implement ADE instead of MSE as metric
-            if self.normalize_dataset:
-                prediction_true = prediction.clone().detach()
-                labels_true = labels.clone().detach()
+            if label_tokens is not None:
 
-                prediction_true = prediction_true * self.ds_std + self.ds_mean
-                labels_true = labels_true * self.ds_std + self.ds_mean
+                # TODO turn off assertions after one batch
+                is_traj_mask = label_tokens.eq(4).unsqueeze(-1).repeat(1, 1, 2)
+                assert torch.equal(self.check_for_fill(labels)[:,:,0], self.check_for_fill(labels)[:,:,1]), 'obs masks on x- and y-direction need to be equal!'
+                assert torch.equal(~self.check_for_fill(labels)[:,:,0], label_tokens.eq(4)), '4-mask in tokens needs to be equal to non-inf mask in traj!'
 
-                metrics = {'MSE_true_caption:': F.mse_loss(prediction_true, labels_true).item()}
+                labels = labels.masked_fill(~is_traj_mask, 0)
+
+                prediction_traj = prediction[0][:,:,:2]
+                prediction_tokens = prediction[0][:,:,2:]
+
+                caption_loss_traj = torch.sum(((prediction_traj-labels)*is_traj_mask)**2.0)  / torch.sum(is_traj_mask)
+                
+                caption_loss_tokens = F.cross_entropy(prediction_tokens.permute(0, 2, 1), label_tokens.long())
+
+                caption_loss = caption_loss_traj + caption_loss_tokens
+
             else:
-                metrics = None
+                prediction_traj = prediction[0].squeeze()
+                caption_loss = F.mse_loss(prediction, labels)
 
+                is_traj_mask = torch.ones_like(prediction_traj, device=prediction_traj.device)
+
+
+            prediction_m = prediction_traj.clone().detach()
+            labels_m = labels.clone().detach()            
+            if self.normalize_dataset:
+                prediction_m = prediction_m * self.ds_std + self.ds_mean
+                labels_m = labels_m * self.ds_std + self.ds_mean
+
+            ade_loss = torch.sum((torch.abs(prediction_m-labels_m) * is_traj_mask))  / torch.sum(is_traj_mask)
+            metrics = {'ADE_true_caption:': ade_loss.item()}
 
             return caption_loss, {'MSE_caption': caption_loss.item()}, metrics
+
+
+class TrajectoryEmbedding(nn.Module):
+    def __init__(self, coord_dims, dict_size, dim, use_tokens=True) -> None:
+        super().__init__()
+        self.coord_dims = coord_dims
+        self.dict_size = dict_size
+        self.dim = dim
+        self.use_tokens = use_tokens
+        self.check_for_fill = torch.isinf
+
+        self.embed_coord = nn.Linear(coord_dims, dim)
+        if self.use_tokens:           
+            self.embed_token = nn.Embedding(dict_size, dim)
+
+        
+    def forward(self, obs, all_tokens):
+
+        start = time.process_time()
+
+        is_traj_mask = self.check_for_fill(obs)[:,:,0]
+        
+        # TODO turn off assertions after one batch
+        assert torch.equal(self.check_for_fill(obs)[:,:,0], self.check_for_fill(obs)[:,:,1]), 'obs masks on x- and y-direction need to be equal!'
+        assert torch.equal(~is_traj_mask.unsqueeze(-1).repeat(1, 1, self.dim)[:,:,0], all_tokens.eq(4)), '4-mask in tokens needs to be equal to non-inf mask in traj!'
+        
+        obs = obs.masked_fill(is_traj_mask.unsqueeze(-1).repeat(1, 1, obs.size(-1)), 0)
+        coord_emb = self.embed_coord(obs)
+
+        if self.use_tokens:
+            token_emb = self.embed_token(all_tokens)
+
+            # only mask out non-trajectories, but not TRAJ token (since it needs to be learned)
+            coord_emb = coord_emb.masked_fill(is_traj_mask.unsqueeze(-1).repeat(1, 1, self.dim), 0)
+            # token_emb = token_emb.masked_fill(~is_traj_mask, 0)
+
+            output = coord_emb + token_emb
+
+            diff = time.process_time() - start
+            # print(f'Forward pass time with inf: {diff} s with {torch.count_nonzero(torch.isinf(obs)[:,:,0])} Falses')
+        else:
+            output = coord_emb
+        
+        return output

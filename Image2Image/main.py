@@ -15,17 +15,17 @@ from hyperparameter_optim import hyperparameter_optimization
 import imageio
 
 CUDA_DEVICE = 0 # 0, 1 or 'cpu'
-MODE = 'denseClass_wEvac' # implemented: grayscale, evac, evac_only, class_movie, density_reg, density_class, denseClass_wEvac
+MODE = 'density_class' # implemented: grayscale, evac, evac_only, class_movie, density_reg, density_class, denseClass_wEvac
 BATCH_SIZE = 4
 ARCH = 'BeIT' # DeepLab, BeIT, SegFormer
-ADD_INFO = True
+ADD_INFO = False
 
 CONFIG = {
     'mode': MODE, # implemented: grayscale, evac, evac_only, class_movie, density_reg, density_class, denseClass_wEvac
     'arch': ARCH, # DeepLab, BeIT, SegFormer
     'cuda_device': CUDA_DEVICE,
     'batch_size': BATCH_SIZE,
-    'from_ckpt_path': 'beit_denseClass_wEvac_wholeDS_addInfo_Res6ConcatAtStart_B_ClassMovie_epoch=39-step=84760.ckpt',
+    'from_ckpt_path': 'beit_wholeDS_rawTF_denseClass_v2_08_02_epoch=21-step=46618.ckpt', # 'beit_denseClass_wEvac_wholeDS_addInfo_Res6ConcatAtStart_B_ClassMovie_epoch=39-step=84760.ckpt',
     'load_to_ckpt_path': 'DELETE_ME_TESTRUN_',
     'early_stopping_patience': 10,
     'run_test_epoch': False,
@@ -52,7 +52,7 @@ TRAIN_DICT = {
     'loss_dict': {'alpha': 0.2, 'beta': 0.8} # 0.005//0.995 leads to lots of nonzero classifications, it's too much #### 0.05//0.95 better (but still too much) #### 0.2//0.8 is QUITE GOOD #### 0.8//0.2 leads to nonzero few classifications (it's too few...)
 }
 
-do_training = True
+do_training = False
 do_hyperparameter_optim = False
 
 if __name__ == '__main__':
@@ -132,13 +132,23 @@ if __name__ == '__main__':
         quit()
 
     # Load from checkpoint
-    CKPT_PATH = SEP.join(['Image2Image', 'checkpoints', 'checkpoints_DeepLab4Img2Img', 'beit_denseClass_wEvac_wholeDS_addInfo_Res6ConcatAtStart_B_ClassMovie_epoch=39-step=84760.ckpt'])
+    CKPT_PATH = SEP.join(['Image2Image', 'checkpoints', 'checkpoints_DeepLab4Img2Img', CONFIG['from_ckpt_path']])
+    state_dict = OrderedDict([(key.replace('net.', ''), tensor) if key.startswith('net.') else (key, tensor) for key, tensor in torch.load(CKPT_PATH)['state_dict'].items()])
     module = Image2ImageModule(config=CONFIG, train_config=TRAIN_DICT)
+    module_state_dict = module.state_dict()
+
+    mkeys_missing_in_loaded = [module_key for module_key in list(module_state_dict.keys()) if module_key not in list(state_dict.keys())]
+    lkeys_missing_in_module = [loaded_key for loaded_key in list(state_dict.keys()) if loaded_key not in list(module_state_dict.keys())]
+    load_dict = OrderedDict()
+    for key, tensor in module_state_dict.items():
+        if key in state_dict.keys():
+            load_dict[key] = state_dict[key]
+        else:
+            load_dict[key] = tensor
+    module.load_state_dict(load_dict)
+
 
     if ARCH == 'BeIT': module.model.model.auxiliary_head = None
-
-    state_dict = OrderedDict([(key.replace('net.', ''), tensor) if key.startswith('net.') else (key, tensor) for key, tensor in torch.load(CKPT_PATH)['state_dict'].items()])
-    module.load_state_dict(state_dict)
     
     # This only works when there are no required positional arguments that need to passed to the constructor
     module.to(f'cuda:{CUDA_DEVICE}')
@@ -157,6 +167,13 @@ if __name__ == '__main__':
             evac_time = batch[0][1].float().to(f'cuda:{CUDA_DEVICE}') # 37.5000, 52.0000, 57.0000, 42.0000 // 36.1168, 51.1394, 65.4047, 45.4009
             evac_time_pred = module.forward(img) # 44.0000, 49.0000, 61.5000, 60.5000 // 47.8699, 48.8511, 53.3266, 60.4169
             mse_loss = torch.nn.MSELoss()(evac_time_pred.squeeze().unsqueeze(0), evac_time.unsqueeze(0))
+        elif MODE == 'denseClass_wEvac':
+            img = batch[0].float().to(f'cuda:{CUDA_DEVICE}')
+            add_info = batch[2][0].float().to(f'cuda:{CUDA_DEVICE}')
+            traj_pred, evac_time_pred = module.forward(img, add_info) if ADD_INFO else module.forward(img)
+            evac_time = batch[1][1]
+            batch[1] = batch[1][0]
+            MODE = 'density_class'
         else:
             img = batch[0].float().to(f'cuda:{CUDA_DEVICE}')
             traj_pred = module.forward(img)#['out']
@@ -321,6 +338,11 @@ if __name__ == '__main__':
                     axes[0].axis('off')
                     axes[1].imshow(binned_pred_img)
                     axes[1].axis('off')
-                    # plt.savefig(os.path.join(test_result_folder, f'floorplan_traj_recon_{idx}_{i}.png'))
+                    # if idx < 3:
+                    #     print(f'At batch id {idx}')
+                    #     plt.imsave(os.path.join(test_result_folder, f'floorplan_density_recon_B{idx}_BI{i}_FR{frame_id}_GT.png'), binned_img)
+                    #     plt.imsave(os.path.join(test_result_folder, f'floorplan_density_recon_B{idx}_BI{i}_FR{frame_id}_PRED.png'), binned_pred_img)
+                    # else: 
+                    #     quit()
                     plt.show()
                     plt.close('all')

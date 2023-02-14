@@ -134,7 +134,10 @@ class BeITTraj(nn.Module):
             x = self.model(x).logits
             x = torch.stack(x, dim=-1).squeeze()
         elif self.mode == 'denseClass_wEvac':
-            x = list(self.model(x, *args))
+            if len(args) > 0:
+                x = list(self.model(x, *args))
+            else:
+                x = list(self.model(x))
             x[0] = torch.stack(x[0], dim=2).squeeze()
         else:
             raise NotImplementedError
@@ -367,7 +370,7 @@ class DistanceResMLPInformationNetwork_B(nn.Module):
 
     def forward(self, x, *args):
         if len(args) == 1:
-            dist_info = args[0][0]
+            dist_info = args[0]#[0]
         else:
             raise NotImplementedError
         beit_out = self.classifier(x)

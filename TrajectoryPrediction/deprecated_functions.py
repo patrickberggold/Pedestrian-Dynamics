@@ -1,4 +1,5 @@
 """ in file FloorplanDataset.py """
+# from Modules.goal.models.goal.utils import create_CNN_inputs_loop
 
 # class Dataset_Seq2Seq(Dataset):
 

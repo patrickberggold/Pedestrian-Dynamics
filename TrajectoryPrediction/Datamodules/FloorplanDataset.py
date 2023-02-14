@@ -1,20 +1,17 @@
 import os
 from torch.utils.data import Dataset
-from torchvision import transforms
 import numpy as np
-import h5py
 from helper import SEP, OPSYS, PREFIX
 import matplotlib.pyplot as plt
 import albumentations as A
 import random
 import torch
-import cv2
 from Datamodules.SceneLoader import Scene_floorplan
 import warnings
-from Modules.goal.models.goal.utils import create_CNN_inputs_loop
 import torchvision.transforms.functional as F
 from tqdm import tqdm
 import sparse
+import time
 
 def is_legitimate_traj(traj_df, step):
     agent_id = traj_df.agent_id.values
@@ -33,23 +30,23 @@ def is_legitimate_traj(traj_df, step):
     # if checks are passed
     return True
 
+
 class Dataset_Seq2Seq(Dataset):
 
-    def __init__(self, arch: str, img_list: list, csv_list: list, split: str, data_format: str = 'by_frame', traj_quantity: str = 'pos', batch_size: int = 100, normalize_dataset: bool = True, transforms = {}, read_from_pickle: bool = False):
+    def __init__(self, config: dict, img_list: list, csv_list: list, split: str, transforms = {}):
         # TODO implement more sophisticated data loading from AgentFormer
-        self.arch = arch
-        self.name = "floorplan"
+        
+        self.arch = config['arch']
 
-        self.layout_types = ['corr_e2e', 'corr_cross']
-        self.data_format = data_format
-        self.traj_quantity = traj_quantity
-        assert self.data_format in ['random', 'by_frame']
+        self.data_format = config['data_format']
+        self.traj_quantity = config['traj_quantity']
+        assert self.data_format in ['random', 'by_frame', 'tokenized']
         assert self.traj_quantity in ['pos', 'vel']
         
-        self.batch_size = 16 if arch == 'goal' else 1000 # 203 vs 1482 can I use the same batch size in the original tf? if not, some mistake... --> uses 10 GB for BS=1000
+        self.batch_size = 16 if self.arch == 'goal' else 1000 # 203 vs 1482 can I use the same batch size in the original tf? if not, some mistake... --> uses 10 GB for BS=1000
         self.dataset_limit = None
         
-        self.seq_length = 20
+        self.seq_length = config['seq_length']
         
         self.split = split
         
@@ -59,7 +56,7 @@ class Dataset_Seq2Seq(Dataset):
         # self.dataset_folder = self.dataset_folder_rgb # os.path.join(self.dataset_folder_rgb, scene_name.split(SEP)[0], scene_name.split(SEP)[1])
         # self.scene_folder = os.path.join(self.dataset_folder, self.name)
 
-        if not read_from_pickle:
+        if not config['read_from_pickle']:
             self.scenes = {i: Scene_floorplan(img_path, csv_path, verbose=False) for  i, (img_path, csv_path) in enumerate(tqdm(zip(img_list, csv_list), desc=f'[stage=={self.split}]\tLoading scenes...', total=len(img_list)))}# i, scene_name in enumerate(img_list)}
 
         self.transforms = transforms['transforms']
@@ -68,9 +65,9 @@ class Dataset_Seq2Seq(Dataset):
         assert self.img_size == 640, 'Resizing is necessary, either via torchvision (in Datamodule) or Albumentations (here in Dataset)!'
         
         # handcrafted for now...
-        self.overall_mean = self.img_size // 2
+        self.overall_mean = 320
         self.overall_std = 75
-        self.normalize_dataset = normalize_dataset
+        self.normalize_dataset = config['normalize_dataset']
 
         # Normalize coordinate system
         # assert self.scenes[0].image_res_x == self.scenes[0].image_res_y
@@ -99,14 +96,16 @@ class Dataset_Seq2Seq(Dataset):
         # self.overall_mean = np.stack(means).mean(0).mean() # not accounted yet for rotations...
         # self.overall_std = np.stack(stds).mean(0).mean() # not accounted yet for rotations...
 
-        self.tokens = ['[BOS]', '[EOS]', '[PAD]', '[TRAJ]', '[MASK]']
-        self.numerical_tokenization = False # REGRESSION TRANSFORMER: CONCURRENT CONDITIONAL GENERATION AND REGRESSION BY BLENDING NUMERICAL AND TEXTUAL TOKENS
+        self.tokens = ['[PAD]', '[BOS]', '[EOS]', '[MASK]', '[TRAJ]', '[UNK]']
+        self.max_pads_per_seq = 5
+        self.fill_value = np.inf 
 
-        if read_from_pickle:
-            import pickle
+        self.numerical_tokenization = False # REGRESSION TRANSFORMER: CONCURRENT CONDITIONAL GENERATION AND REGRESSION BY BLENDING NUMERICAL AND TEXTUAL TOKENS --> x & y to one or two tokens
+
+        if config['read_from_pickle']:
             from pickle import Unpickler
             from helper import TQDMBytesReader
-            store_path = SEP.join(['TrajectoryPrediction', 'LTCFP_new', 'Datamodules', f'dataset_{split}_whole_{data_format}_seq{self.seq_length}.pickle'])
+            store_path = SEP.join(['TrajectoryPrediction', 'Datamodules', f'dataset_{split}_whole_{self.data_format}_seq{self.seq_length}.pickle'])
             print(f'Loading {split} dataset from pickle ({store_path})...')
             with open(store_path, 'rb') as handle:
                 total = os.path.getsize(store_path)
@@ -122,41 +121,44 @@ class Dataset_Seq2Seq(Dataset):
         elif self.data_format == 'by_frame':
             self.read_by_frame_trajectory_loader()
         elif self.data_format == 'random':
-            self.read_by_random_trajectory_loader()
+            self.read_random_trajectory_loader()
+        elif self.data_format == 'tokenized':
+            self.read_tokenized_trajectory_loader()
+        else:
+            raise NotImplementedError
 
-        MAX_BATCH = 3000
-        if MAX_BATCH:
+        MAX_TRAJ_PER_BATCH = 3000
+        # Chunking batches to comply with maximum trajectories per batch (OOM issues...)
+        if MAX_TRAJ_PER_BATCH:
             # print('S')
             sequence_list = []
-            for item in tqdm(self.sequence_list, desc=f'[Chunking batches to maximum {MAX_BATCH} sequence length]...'):
+            for item in tqdm(self.sequence_list, desc=f'[Chunking batches to maximum {MAX_TRAJ_PER_BATCH} sequence length]...'):
                 num_sequences = len(item['batch_of_sequences'])
-                if num_sequences <= MAX_BATCH:
+                if num_sequences <= MAX_TRAJ_PER_BATCH:
                     sequence_list += [item]
                 else:
                     sequences_per_scene = []
-                    for x in range(0, num_sequences, MAX_BATCH):
-                        sequences_per_scene += [item['batch_of_sequences'][x:x+MAX_BATCH]]
-                    for sequence_chunk in sequences_per_scene:
-                        sequence_list += [{
+                    if self.data_format == 'tokenized': tokens_per_scene = []
+                    
+                    for x in range(0, num_sequences, MAX_TRAJ_PER_BATCH):
+                        sequences_per_scene += [item['batch_of_sequences'][x:x+MAX_TRAJ_PER_BATCH]]
+                        if self.data_format == 'tokenized': tokens_per_scene += [item['tokenized_sequences'][x:x+MAX_TRAJ_PER_BATCH]]
+                    
+                    for ids, sequence_chunk in enumerate(sequences_per_scene):
+                        add_item = [{
                             'batch_of_sequences': sequence_chunk,
                             'scene_path': item['scene_path']
                         }]
-            self.sequence_list = sequence_list
+                        if self.data_format == 'tokenized': add_item[0]['tokenized_sequences'] = tokens_per_scene[ids]
+                        sequence_list += add_item
 
-            # self.sequence_list += [{
-            #     'batch_of_sequences': sequences_per_scene[x:x+MAX_BATCH],
-            #     'scene_path': scene.RGB_image_path,
-            #     'scene_data': {
-            #         'scene_id': sc_id,
-            #         # 'image_res_x': scene.image_res_x,
-            #         # 'image_res_y': scene.image_res_y,
-            #         # 'floorplan_min_x': scene.floorplan_min_x,
-            #         # 'floorplan_min_y': scene.floorplan_min_y,
-            #         # 'floorplan_max_x': scene.floorplan_max_x,
-            #         # 'floorplan_max_y': scene.floorplan_max_y,
-            #         },
-            #     'type': 'pos',
-            #     } for x in range(0, len(self.sequence_list), MAX_BATCH)]
+            self.sequence_list = sequence_list
+        
+        warnings.filterwarnings("ignore")
+
+
+    def tokenize(self, token):
+        return self.tokens.index(token)
 
 
     def read_by_frame_trajectory_loader(self):
@@ -265,7 +267,7 @@ class Dataset_Seq2Seq(Dataset):
             self.sequence_list = self.sequence_list[:self.dataset_limit]
     
     
-    def read_by_random_trajectory_loader(self):
+    def read_random_trajectory_loader(self):
         """ Based on Goal-SAR """
         sequences_per_scene = []
         self.sequence_list = []
@@ -331,13 +333,95 @@ class Dataset_Seq2Seq(Dataset):
             self.sequence_list = self.sequence_list[:self.dataset_limit]
 
 
+    def read_tokenized_trajectory_loader(self):
+        
+        self.sequence_list = []
+
+        sequence_id = 0
+        for sc_id, scene in tqdm(self.scenes.items(), desc=f'[stage=={self.split}]\tPreprocessing trajectories...'):
+            raw_pixel_data = scene.raw_pixel_data
+
+            frame_ids = np.sort(np.unique(raw_pixel_data.frame_id.values))
+            start_frame_id = frame_ids[0]
+            end_frame_id = frame_ids[-1]
+
+            # expand frames from both sides for BOS and EOS tokens
+            start_frame_id -= 1
+            end_frame_id += 1
+            all_frames = np.arange(start_frame_id, end_frame_id+1)
+
+            sequences_per_scene = []
+            # TODO store entire trajectories of variable length
+
+            for agent_i in set(raw_pixel_data.agent_id):
+                raw_agent_data = raw_pixel_data[raw_pixel_data.agent_id == agent_i]
+                # downsample frame rate happens here, at the single agent level
+                raw_agent_data = raw_agent_data.to_numpy(dtype=np.float32)
+
+                agent_presence_frames = raw_agent_data[:, 0].astype(int)
+                coord_data = raw_agent_data[:, 2:].astype(np.float32)
+
+                agent_token_frames = []
+                bos_it = 0
+                eos_it = 0
+                for index in all_frames:
+                    if index in agent_presence_frames:
+                        agent_token_frames.append(self.tokenize('[TRAJ]'))
+                    elif index==(agent_presence_frames[0]-1):
+                        agent_token_frames.append(self.tokenize('[BOS]'))
+                        bos_it += 1
+                    elif index==(agent_presence_frames[-1]+1):
+                        agent_token_frames.append(self.tokenize('[EOS]'))
+                        eos_it += 1
+                    elif index < (agent_presence_frames[0]-1) or index > (agent_presence_frames[-1]+1):
+                        agent_token_frames.append(self.tokenize('[PAD]'))
+                    else:
+                        raise IndexError('Bug or trajectory is interrupted!')
+
+                bos_index = np.where(np.array(agent_token_frames) == self.tokenize('[BOS]'))[0]
+                eos_index = np.where(np.array(agent_token_frames) == self.tokenize('[EOS]'))[0]
+
+                coord_data = np.pad(coord_data, ((int(bos_index)+1, len(agent_token_frames)-int(eos_index)), (0, 0)), 'constant', constant_values=(self.fill_value, self.fill_value))
+
+                # Some checking
+                assert bos_it == 1 and eos_it == 1, f'bos_it == {bos_it} and eos_it == {eos_it}, both need to be one!'
+                assert len(all_frames) == len(agent_token_frames) == len(coord_data)
+                # assert np.all(coord_data[np.argwhere(np.array(agent_token_frames) != self.tokenize('[TRAJ]')).squeeze()] == self.fill_value), f'Assertion that all non-[TRAJ] are assigned with {self.fill_value} is violated!'
+                # assert np.all(coord_data[np.argwhere(np.array(agent_token_frames) == self.tokenize('[TRAJ]')).squeeze()] != self.fill_value), 'Assertion that all [TRAJ] are assigned with true coords is violated!'
+
+                for start_t in range(0, len(all_frames)-self.seq_length):
+                    seq_tokens = agent_token_frames[start_t:start_t + self.seq_length]                  
+                    if np.count_nonzero(np.array(seq_tokens) == self.tokenize('[PAD]')) > self.max_pads_per_seq:
+                        # sequences cannot contain more than 3 PADS
+                        continue
+
+                    seq_coords = coord_data[start_t:start_t + self.seq_length]
+                    sequences_per_scene.append([seq_tokens, seq_coords])
+
+            random.shuffle(sequences_per_scene)
+
+            sequence_tokens =  [agent_data[0] for agent_data in sequences_per_scene]
+            sequences_coords = [agent_data[1] for agent_data in sequences_per_scene]
+
+            self.sequence_list += [{
+                'batch_of_sequences': sequences_coords,
+                'tokenized_sequences': sequence_tokens,
+                'scene_path': scene.RGB_image_path,
+                }]
+
+        hello = 1
+
+
     def __len__(self):
         return len(self.sequence_list)
 
 
     def augment_traj_and_images_sparse(self, trajectories, np_image, augmentation):
 
-        keypoints = list(map(tuple, trajectories.reshape(-1, 2)))
+        # keypoints = list(map(tuple, trajectories.reshape(-1, 2)))
+        keypoints = trajectories.reshape(-1, 2)
+        all_finites = np.isfinite(keypoints[:,0])
+        # keypoint_mask = keypoints[:, 0] != np.nan
 
         # flipping, transposing, random 90 deg rotations
         transform = A.Compose([
@@ -349,64 +433,18 @@ class Dataset_Seq2Seq(Dataset):
             keypoint_params=A.KeypointParams(format='xy', remove_invisible=False))
 
         #################### TEST START ####################
-        # from skimage.draw import line
-        # # plt.imshow(np_image) # weg
-        # traj = np.array(keypoints)
-        # np_image_draw = np_image.copy()
-        # # traj = [t for t in traj]
-        # trajs = [traj[x:x+self.seq_length] for x in range(0, len(traj), self.seq_length)]
-        # # for t_id in traj:
-        # for traj in trajs:
-        #     old_point = None
-        #     r_val = random.uniform(0.4, 1.0)
-        #     b_val = random.uniform(0.7, 1.0)
-        #     for point in traj:
-        #         x_n, y_n = round(point[0]), round(point[1])
-        #         assert 0 <= x_n <= np_image.shape[1] and 0 <= y_n <= np_image.shape[0], f'{x_n} > {np_image.shape[1]} or {y_n} > {np_image.shape[0]}'
-        #         if old_point != None:
-        #             # cv2.line(img_np, (old_point[1], old_point[0]), (y_n, x_n), (0, 1.,0 ), thickness=5)
-        #             c_line = [coord for coord in zip(*line(*(old_point[0], old_point[1]), *(x_n, y_n)))]
-        #             for c in c_line:
-        #                 np_image_draw[c[1], c[0]] = np.array([r_val, 0., b_val])
-        #             # plt.imshow(img_np)
-        #         old_point = (x_n, y_n)
-
-        # plt.imshow(np_image_draw)
-        # plt.close('all')
+        # self.visualize_traj(keypoints, np_image)
         #################### TEST END ####################
         
         transformed = transform(image=np_image, keypoints=keypoints)
-        
+
         transformed_trajectories = np.array(transformed['keypoints'])
         # apply mean shift and std
         if self.traj_quantity == 'pos' and self.normalize_dataset:
             transformed_trajectories = (transformed_trajectories - self.overall_mean) / self.overall_std
 
         # #################### TEST START ####################
-        # from skimage.draw import line
-        # np_image_draw = transformed['image']#/255.
-
-        # traj = np.array(transformed['keypoints'])
-        # trajs = [traj[x:x+self.seq_length] for x in range(0, len(traj), self.seq_length)]
-        # # for t_id in traj:
-        # for traj in trajs:
-        #     old_point = None
-        #     r_val = random.uniform(0.4, 1.0)
-        #     b_val = random.uniform(0.7, 1.0)
-        #     for point in traj:
-        #         x_n, y_n = round(point[0]), round(point[1])
-        #         # assert 0 <= x_n <= np_image_draw.shape[1] and 0 <= y_n <= np_image_draw.shape[0]
-        #         if old_point != None:
-        #             # cv2.line(img_np, (old_point[1], old_point[0]), (y_n, x_n), (0, 1.,0 ), thickness=5)
-        #             c_line = [coord for coord in zip(*line(*(old_point[0], old_point[1]), *(x_n, y_n)))]
-        #             for c in c_line:
-        #                 np_image_draw[c[1], c[0]] = np.array([r_val, 0., b_val])
-        #             # plt.imshow(img_np)
-
-        #         old_point = (x_n, y_n)
-        #     # cv2.imshow('namey', img_np)
-        # plt.imshow(np_image_draw)
-        # plt.close('all')
+        # self.visualize_traj(np.array(transformed['keypoints']), transformed['image'])
         # #################### TEST END ####################
 
         image = torch.tensor(transformed['image']).permute(2, 0, 1).float()
@@ -415,38 +453,56 @@ class Dataset_Seq2Seq(Dataset):
 
         return [image, trajectories_t]
 
+    
+    def visualize_traj(self, trajectories_nx2, np_image, max_traj_vis: int = 20):
+        from skimage.draw import line
+        # plt.imshow(np_image) # weg
+        traj = np.array(trajectories_nx2)
+        np_image_draw = np_image.copy()
+        # traj = [t for t in traj]
+        trajs = [traj[x:x+self.seq_length] for x in range(0, len(traj), self.seq_length)]
+        # for t_id in traj:
+        for traj in trajs[:max_traj_vis]:
+            old_point = None
+            r_val = random.uniform(0.4, 1.0)
+            b_val = random.uniform(0.7, 1.0)
+            for point in traj:
+                if np.isinf(point[0]) and np.isinf(point[1]):
+                    continue
+                x_n, y_n = round(point[0]), round(point[1])
+                assert 0 <= x_n <= np_image.shape[1] and 0 <= y_n <= np_image.shape[0], f'{x_n} > {np_image.shape[1]} or {y_n} > {np_image.shape[0]}'
+                if old_point != None:
+                    # cv2.line(img_np, (old_point[1], old_point[0]), (y_n, x_n), (0, 1.,0 ), thickness=5)
+                    c_line = [coord for coord in zip(*line(*(old_point[0], old_point[1]), *(x_n, y_n)))]
+                    for c in c_line:
+                        np_image_draw[c[1], c[0]] = np.array([r_val, 0., b_val])
+                    # plt.imshow(img_np)
+                old_point = (x_n, y_n)
+
+        plt.imshow(np_image_draw)
+        plt.close('all')
+
 
     def __getitem__(self, idx):
         
         # LOAD CSV DATA
         sequence = self.sequence_list[idx] # 'scene_path': corr_cross\\0__floorplan_siteX_35_siteY_20_CORRWIDTH_3_SIDECORRWIDTH_20_numCross_2\\variation_56\\variation_56_num_agents_15.npz'
 
-
-        # abs_pixel_coord = np.moveaxis(np.stack([frag_coord['abs_pixel_coord'] for frag_coord in sequence['batch_of_sequences']], axis=0), 0, 1)
-        # abs_pixel_coord = np.stack([frag_coord['abs_pixel_coord'] for frag_coord in sequence['batch_of_sequences']], axis=0)
         abs_pixel_coord = np.stack(sequence['batch_of_sequences'], axis=0)
-
-        # tensor_image, [scale_x, scale_y, rotation_angle, h_flip, v_flip] = self.image_and_traj_preprocessing(sequence['scene_path'], sequence['abs_pixel_coord'])
-        
-        # to get a clear image, convert to bool first to get rid of values betweet 1 and 254 (all stored as 1)
-        # np_image = np.array(h5py.File(sequence['scene_path'], 'r').get('img')).astype(bool).astype(np.float32)
+        if self.data_format == 'tokenized':
+            tokenized_sequences = np.stack(sequence['tokenized_sequences'], axis=0)
+       
         np_image = sparse.load_npz(sequence['scene_path']).todense()
-        np_image = np_image.astype(np.float32) / 255.
+        np_image = np_image.astype(np.float32) / 255. # normalization takes place down below....
         # TODO only way with this dataset for quick float 0. - 1. conversion, but light or dark area do not matter at all, only [1 0 0] or [0 1 0]
-
-        # input_traj_maps = create_CNN_inputs_loop(
-        #     batch_abs_pixel_coords=torch.tensor(np.moveaxis(abs_pixel_coord, 0, 1)).float(),
-        #     tensor_image=F.to_tensor(np_image))
-
-        batch_data = {
-            'abs_pixel_coord': abs_pixel_coord,
-        }
-
-        warnings.filterwarnings("ignore")
+        
         # batch_data = self.augment_traj_and_create_traj_maps(batch_data, np_image, self.data_augmentation)
-        batch_data = self.augment_traj_and_images_sparse(batch_data['abs_pixel_coord'], np_image, self.data_augmentation)
+        batch_data = self.augment_traj_and_images_sparse(abs_pixel_coord, np_image, self.data_augmentation)
 
         if self.transforms:
             batch_data[0] = self.transforms(batch_data[0])
+
+        if self.data_format == 'tokenized':
+            batch_data.append(tokenized_sequences)
         
         return batch_data

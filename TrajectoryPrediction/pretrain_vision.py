@@ -59,7 +59,7 @@ def pretrain_vision(cuda_device):
         # trained_together_OPTIM_TWICE_2_1000dataset_epoch=16-step=2125.ckpt
         # CKPT_PATH = SEP.join(['Image2Image', 'checkpoints', 'checkpoints_DeepLab4Img2Img', 'beit_whole_ds_finetuned_epoch=74-step=158925.ckpt'])
         # CKPT_PATH = SEP.join(['Image2Image', 'checkpoints', 'checkpoints_DeepLab4Img2Img', CONFIG['from_ckpt_path']])
-        CKPT_PATH = SEP.join(['TrajectoryPrediction', 'LTCFP_new', 'checkpoints', 'img2img_pretrain', CONFIG['from_ckpt_path']])
+        CKPT_PATH = SEP.join(['TrajectoryPrediction', 'checkpoints', 'img2img_pretrain', CONFIG['from_ckpt_path']])
         state_dict = OrderedDict([(key.replace('net.', ''), tensor) if key.startswith('net.') else (key, tensor) for key, tensor in torch.load(CKPT_PATH)['state_dict'].items()])
         module_state_dict = module.state_dict()
 
@@ -85,7 +85,7 @@ def pretrain_vision(cuda_device):
     if pretrain_arch == 'BeIT': module.model.model.auxiliary_head = None
     
     model_checkpoint = ModelCheckpoint(
-        dirpath = SEP.join(['TrajectoryPrediction', 'LTCFP_new', 'checkpoints', 'img2img_pretrain']),
+        dirpath = SEP.join(['TrajectoryPrediction', 'checkpoints', 'img2img_pretrain']),
         filename = CONFIG['load_to_ckpt_path']+'{epoch}-{step}',
         save_top_k = 1,
         verbose = True, 

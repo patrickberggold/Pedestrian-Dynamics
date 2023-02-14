@@ -27,7 +27,7 @@ class ImgBackbonePretrained(nn.Module):
         else:
             raise NotImplementedError
 
-        CKPT_PATH = SEP.join(['TrajectoryPrediction', 'LTCFP_new', 'checkpoints', 'img2img_pretrain', ckpt])
+        CKPT_PATH = SEP.join(['TrajectoryPrediction', 'checkpoints', 'img2img_pretrain', ckpt])
         state_dict = OrderedDict([(key.replace(f'model.model.{arch.lower()}.', ''), tensor) for key, tensor in torch.load(CKPT_PATH)['state_dict'].items() if key.startswith(f'model.model.{arch.lower()}.')])
         module_state_dict = self.backbone.state_dict()
 

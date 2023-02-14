@@ -19,32 +19,26 @@ class LayerNorm(torch.nn.Module):
 
 class Seq2SeqModule(pl.LightningModule):
     def __init__(
-        self, 
-        mode: str, 
-        arch: str,
-        img_arch: str,
+        self,
+        config: dict, 
         learning_rate: float = 5e-4, 
         lr_scheduler: str = ReduceLROnPlateau.__name__, 
-        lr_sch_step_size: int = 8,
         lr_sch_gamma: float = 0.3, 
         unfreeze_backbone_at_epoch: int = 8,
         alternate_unfreezing: int = False,
-        traj_quantity: str = 'pos',
-        normalize_dataset: bool = False
         ):
         super(Seq2SeqModule, self).__init__()
         
-        self.mode = mode
-        self.arch = arch
-        self.img_arch = img_arch
+        self.arch = config['arch']
+        self.img_arch = config['img_arch']
         self.learning_rate = learning_rate
         self.lr_scheduler = lr_scheduler
-        self.lr_sch_step_size = lr_sch_step_size
+        self.lr_sch_step_size = 100 if lr_scheduler==CosineAnnealingLR.__name__ else 5 # lr_sch_step_size
         self.lr_sch_gamma = lr_sch_gamma
         self.unfreeze_backbone_at_epoch = unfreeze_backbone_at_epoch
         self.alternate_unfreezing = alternate_unfreezing
-        self.traj_quantity = traj_quantity
-        self.normalize_dataset = normalize_dataset
+        self.traj_quantity = config['traj_quantity']
+        self.normalize_dataset = config['normalize_dataset']
 
         assert self.lr_scheduler in [CosineAnnealingLR.__name__, StepLR.__name__, ExponentialLR.__name__, ReduceLROnPlateau.__name__], 'Unknown LR Scheduler!'
         assert self.arch in ['goal', 'tf', 'coca'], 'Unknown architecture!'
@@ -58,19 +52,18 @@ class Seq2SeqModule(pl.LightningModule):
             # from Modules.coca.coca import CoCa
             use_contrastive_loss = False
             self.net = CoCa4Traj(
+                config=config,
                 dim = 512, 
                 num_tokens = 20000, 
-                unimodal_depth = 6, 
-                multimodal_depth = 6, 
+                unimodal_depth = 6, # DEFAULT 6
+                multimodal_depth = 6, # DEFAULT 6
                 dim_head = 64, 
                 heads = 8,
                 ff_mult = 1, # DEFAULT 4
                 caption_loss_weight = 1., 
                 contrastive_loss_weight = 1., 
                 forTraj=True, 
-                use_contrastive_loss=use_contrastive_loss, 
-                normalize_dataset=self.normalize_dataset,
-                img_arch = self.img_arch
+                use_contrastive_loss=use_contrastive_loss,
             )
 
             # self.net = CoCa(dim = 512, image_dim = 1024, num_tokens = 20000, unimodal_depth = 6, multimodal_depth = 6, dim_head = 64, heads = 8, caption_loss_weight = 1., contrastive_loss_weight = 1.)
@@ -84,9 +77,9 @@ class Seq2SeqModule(pl.LightningModule):
             #                     truncation=True, return_tensors="pt")
 
             # bert = BertModel.from_pretrained('bert-base-cased')
-            # out1 = bert.embeddings.word_embeddings(bert_input.data['input_ids'])
-            # weight_t = bert.embeddings.word_embeddings.weight[:,0].detach().numpy()
+            # bert_input = bert_input['input_ids']
             # out_sentence = bert(bert_input)
+            # hi = 5
 
             # use_traj = False
             # if use_traj:
@@ -159,7 +152,7 @@ class Seq2SeqModule(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx: int) -> None:
 
-        prediction = self.net.forward(batch, decoder_mode=1) # decoder_mode: 0=teacher forcing, 1=running free, 2=scheduled sampling
+        prediction = self.net.forward(batch, decoder_mode=0) # decoder_mode: 0=teacher forcing, 1=running free, 2=scheduled sampling
 
         val_loss, losses_it, metrics_it = self.net.compute_loss(prediction, batch, stage='val')
 
@@ -305,7 +298,7 @@ class Seq2SeqModule(pl.LightningModule):
         self.val_metrics = {}
 
         # Print log
-        print('\nTRAINING RESULT:')
+        print('\n\nTRAINING RESULT:')
         for key, val in self.train_losses_per_epoch.items():
             print(key, ': ', val)
         # for result in self.train_losses_per_epoch['loss']:
@@ -315,7 +308,7 @@ class Seq2SeqModule(pl.LightningModule):
                 print(key, ': ', val)
             print('\n')
 
-        print('\nVALIDATION RESULT:')
+        print('VALIDATION RESULT:')
         for key, val in self.val_losses_per_epoch.items():
             print(key, ': ', val)
         # for result in self.val_losses_per_epoch['val_loss']:
@@ -325,74 +318,6 @@ class Seq2SeqModule(pl.LightningModule):
                 print(key, ': ', val)
         print('')
 
-
-    # def on_validation_epoch_end(self) -> None:
-
-    #     if self.trainer.state.stage in ['sanity_check', 'train']: return super().on_train_epoch_end()
-
-    #     # Training Logs
-    #     for key, val in self.train_losses.items():
-    #         if key not in self.train_losses_per_epoch:
-    #             mean = sum(val)/len(val)
-    #             self.train_losses_per_epoch.update({key: [mean]})
-    #         else:
-    #             self.train_losses_per_epoch[key].append(sum(val)/len(val))
-
-    #     for key, val in self.train_metrics.items():
-    #         if key not in self.train_metrics_per_epoch:
-    #             mean = np.array(val).mean()
-    #             self.train_metrics_per_epoch.update({key: [mean]})
-    #             if "goal" in key:
-    #                 self.train_metrics_per_epoch.update({key+'_std': np.array(val).std()})
-    #         else:
-    #             self.train_metrics_per_epoch[key].append(np.array(val).mean())
-    #             if "goal" in key:
-    #                 self.train_metrics_per_epoch[key+'_std'].append(np.array(val).std())
-
-    #     # Validation logs
-    #     for key, val in self.val_losses.items():
-    #         if key not in self.val_losses_per_epoch:
-    #             mean = sum(val)/len(val)
-    #             self.val_losses_per_epoch.update({key: [mean]})
-    #         else:
-    #             self.val_losses_per_epoch[key].append(sum(val)/len(val))
-
-    #     for key, val in self.val_metrics.items():
-    #         if key not in self.val_metrics_per_epoch:
-    #             mean = np.array(val).mean()
-    #             self.val_metrics_per_epoch.update({key: [mean]})
-    #             if "goal" in key:
-    #                 self.val_metrics_per_epoch.update({key+'_std': np.array(val).std()})
-    #         else:
-    #             self.val_metrics_per_epoch[key].append(np.array(val).mean())
-    #             if "goal" in key:
-    #                 self.val_metrics_per_epoch[key+'_std'].append(np.array(val).std())
-    #     # Reset
-    #     self.train_losses = {}
-    #     self.val_losses = {}
-    #     self.train_metrics = {}
-    #     self.val_metrics = {}
-
-    #     # Print log
-    #     print('\nTRAINING RESULT:')
-    #     for key, val in self.train_losses_per_epoch.items():
-    #         print(key, ': ', val)
-    #     # for result in self.train_losses_per_epoch['loss']:
-    #     #     print(result) 
-    #     if self.train_metrics_per_epoch:
-    #         for key, val in self.train_metrics_per_epoch.items():
-    #             print(key, ': ', val)
-    #         print('\n')
-
-    #     print('\nVALIDATION RESULT:')
-    #     for key, val in self.val_losses_per_epoch.items():
-    #         print(key, ': ', val)
-    #     # for result in self.val_losses_per_epoch['val_loss']:
-    #     #     print(result)
-    #     if self.val_metrics_per_epoch:
-    #         for key, val in self.val_metrics_per_epoch.items():
-    #             print(key, ': ', val)
-    #     print('')
 
     def on_fit_end(self):
         # return super().on_fit_end()

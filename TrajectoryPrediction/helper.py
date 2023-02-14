@@ -1,13 +1,13 @@
 import platform
 from skimage.draw import line
 from prettytable import PrettyTable
+import os
 
 OPSYS = platform.system()
 SEP = '\\' if OPSYS == 'Windows' else '/'
 PREFIX = '/mnt/c' if OPSYS == 'Linux' else 'C:'
 
 # Check intermediate layers and sizes
-
 def count_parameters(model):
     table = PrettyTable(["Modules", "Parameters"])
     total_params = 0
@@ -23,6 +23,7 @@ def count_parameters(model):
     table.sortby = "Parameters"
     print(f"Total Trainable Params: {total_params}")
     return total_params
+
 
 def linemaker(p_start, p_end, thickness=1):
     x_start, x_end, y_start, y_end = p_start[0], p_end[0], p_start[1], p_end[1]
@@ -62,6 +63,7 @@ def linemaker(p_start, p_end, thickness=1):
 
     return lines
 
+
 class TQDMBytesReader(object):
     """ from https://stackoverflow.com/questions/30611840/pickle-dump-with-progress-bar """
     def __init__(self, fd, **kwargs):
@@ -86,3 +88,13 @@ class TQDMBytesReader(object):
     def __exit__(self, *args, **kwargs):
         return self.tqdm.__exit__(*args, **kwargs)
 
+
+def dir_maker(store_folder_path, description_log):
+    if os.path.isdir(store_folder_path):
+        print('Path already exists!')
+        quit()
+    else:
+        os.mkdir(store_folder_path)
+        with open(os.path.join(store_folder_path, 'description.txt'), 'w') as f:
+            f.write(description_log)
+        f.close()

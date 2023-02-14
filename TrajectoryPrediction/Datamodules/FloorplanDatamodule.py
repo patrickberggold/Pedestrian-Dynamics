@@ -9,43 +9,34 @@ from tqdm import tqdm
 
 class FloorplanDatamodule(pl.LightningDataModule):
     def __init__(
-        self, 
-        mode: str,
-        arch: str,
-        img_arch: str,
-        cuda_index: int, 
-        batch_size: int = 4, 
-        num_workers: int = 2,
-        data_format: str = 'by_frame', 
-        traj_quantity: str = 'vel',
-        normalize_dataset: bool = True,
-        limit_dataset: bool = False,
-        read_from_pickle: bool = False
+        self,
+        config: dict,
+        num_workers: int = 0,
         ):
         super().__init__()
 
-        self.mode = mode
-        self.arch = arch
-        self.img_arch = img_arch
-        self.batch_size = batch_size
+        self.config = config
+        self.arch = config['arch']
+        self.img_arch = config['img_arch']
+        self.cuda_index = config['cuda_device']
+        self.batch_size = config['imgs_per_batch']
 
-        self.cuda_index = cuda_index
         self.num_workers = num_workers
-        self.data_format = data_format
-        self.traj_quantity = traj_quantity
+        self.data_format = config['data_format']
+        self.traj_quantity = config['traj_quantity']
         splits = [0.7, 0.15, 0.15]
-        self.limit_dataset = limit_dataset
+        self.limit_dataset = config['limit_dataset']
         self.set_data_paths(splits)
-        self.normalize_dataset = normalize_dataset
+        self.normalize_dataset = config['normalize_dataset']
 
         store_as_pickle = False
-        self.read_from_pickle = read_from_pickle
+        self.read_from_pickle = config['read_from_pickle']
 
-        if img_arch in ['BeIT', 'SegFormer']:
-            if img_arch == 'BeIT':
+        if self.img_arch in ['BeIT', 'SegFormer']:
+            if self.img_arch == 'BeIT':
                 from transformers import BeitFeatureExtractor
                 feature_extractor = BeitFeatureExtractor.from_pretrained('microsoft/beit-base-finetuned-ade-640-640')
-            elif img_arch == 'SegFormer':
+            elif self.img_arch == 'SegFormer':
                 from transformers import SegformerFeatureExtractor
                 # https://xieenze.github.io/segformer.pdf
                 # feature_extractor = SegformerFeatureExtractor.from_pretrained('nvidia/segformer-b5-finetuned-ade-640-640')
@@ -80,25 +71,25 @@ class FloorplanDatamodule(pl.LightningDataModule):
             import pickle
             self.setup('train')
             
-            with open(SEP.join(['TrajectoryPrediction', 'LTCFP_new', 'Datamodules', 'dataset_train_whole_random_seq20.pickle']), 'wb') as handle:
+            with open(SEP.join(['TrajectoryPrediction', 'Datamodules', 'dataset_train_whole_random_seq20.pickle']), 'wb') as handle:
                 print('Storing train dataset as pickle...')
                 pickle.dump(self.train_dataset.sequence_list, handle, protocol=pickle.HIGHEST_PROTOCOL)
             
-            with open(SEP.join(['TrajectoryPrediction', 'LTCFP_new', 'Datamodules', 'dataset_val_whole_random_seq20.pickle']), 'wb') as handle:
+            with open(SEP.join(['TrajectoryPrediction', 'Datamodules', 'dataset_val_whole_random_seq20.pickle']), 'wb') as handle:
                 print('Storing validation dataset as pickle...')
                 pickle.dump(self.val_dataset.sequence_list, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-            with open(SEP.join(['TrajectoryPrediction', 'LTCFP_new', 'Datamodules', 'dataset_test_whole_random_seq20.pickle']), 'wb') as handle:
+            with open(SEP.join(['TrajectoryPrediction', 'Datamodules', 'dataset_test_whole_random_seq20.pickle']), 'wb') as handle:
                 print('Storing test dataset as pickle...')
                 pickle.dump(self.test_dataset.sequence_list, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
             quit()
 
     def setup(self, stage):
-        # TODO
-        self.train_dataset = Dataset_Seq2Seq(self.arch, self.train_imgs_list, self.train_csv_list, data_format=self.data_format, traj_quantity=self.traj_quantity, split='train', normalize_dataset=self.normalize_dataset, transforms=self.train_transforms, read_from_pickle=self.read_from_pickle)
-        self.val_dataset = Dataset_Seq2Seq(self.arch, self.val_imgs_list, self.val_csv_list, data_format=self.data_format, traj_quantity=self.traj_quantity, split='val', normalize_dataset=self.normalize_dataset, transforms=self.val_transforms, read_from_pickle=self.read_from_pickle)
-        self.test_dataset = Dataset_Seq2Seq(self.arch, self.test_imgs_list, self.test_csv_list, data_format=self.data_format, traj_quantity=self.traj_quantity, split='test', normalize_dataset=self.normalize_dataset, transforms=self.val_transforms, read_from_pickle=self.read_from_pickle)
+
+        self.train_dataset = Dataset_Seq2Seq(self.config, self.train_imgs_list, self.train_csv_list, split='train', transforms=self.train_transforms)
+        self.val_dataset = Dataset_Seq2Seq(self.config, self.val_imgs_list, self.val_csv_list, split='val', transforms=self.val_transforms)
+        self.test_dataset = Dataset_Seq2Seq(self.config, self.test_imgs_list, self.test_csv_list, split='test', transforms=self.val_transforms)
 
     def train_dataloader(self):
         return DataLoader(self.train_dataset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=True)
