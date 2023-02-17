@@ -30,6 +30,7 @@ class FloorplanDatamodule(pl.LightningDataModule):
         self.normalize_dataset = config['normalize_dataset']
 
         store_as_pickle = False
+        self.train_loader_shuffle = False
         self.read_from_pickle = config['read_from_pickle']
 
         if self.img_arch in ['BeIT', 'SegFormer']:
@@ -92,7 +93,7 @@ class FloorplanDatamodule(pl.LightningDataModule):
         self.test_dataset = Dataset_Seq2Seq(self.config, self.test_imgs_list, self.test_csv_list, split='test', transforms=self.val_transforms)
 
     def train_dataloader(self):
-        return DataLoader(self.train_dataset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=True)
+        return DataLoader(self.train_dataset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=self.train_loader_shuffle)
 
     def val_dataloader(self):
         return DataLoader(self.val_dataset, batch_size=self.batch_size, num_workers=self.num_workers)

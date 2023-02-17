@@ -29,6 +29,7 @@ class Seq2SeqModule(pl.LightningModule):
         ):
         super(Seq2SeqModule, self).__init__()
         
+        self.mode = config['mode']
         self.arch = config['arch']
         self.img_arch = config['img_arch']
         self.learning_rate = learning_rate
@@ -39,6 +40,10 @@ class Seq2SeqModule(pl.LightningModule):
         self.alternate_unfreezing = alternate_unfreezing
         self.traj_quantity = config['traj_quantity']
         self.normalize_dataset = config['normalize_dataset']
+
+        # decoder_mode: 0=teacher forcing, 1=running free, 2=scheduled sampling
+        self.decoder_mode_training = 0
+        self.decoder_mode_validation = 1 if self.mode == 'TRAJ_PRED' else 0
 
         assert self.lr_scheduler in [CosineAnnealingLR.__name__, StepLR.__name__, ExponentialLR.__name__, ReduceLROnPlateau.__name__], 'Unknown LR Scheduler!'
         assert self.arch in ['goal', 'tf', 'coca'], 'Unknown architecture!'
@@ -53,16 +58,14 @@ class Seq2SeqModule(pl.LightningModule):
             use_contrastive_loss = False
             self.net = CoCa4Traj(
                 config=config,
-                dim = 512, 
-                num_tokens = 20000, 
-                unimodal_depth = 6, # DEFAULT 6
-                multimodal_depth = 6, # DEFAULT 6
+                dim = 512,
+                sequence_enc_blocks = 4,  # DEFAULT 6
+                multimodal_blocks = 4,  # DEFAULT 6
                 dim_head = 64, 
                 heads = 8,
                 ff_mult = 1, # DEFAULT 4
                 caption_loss_weight = 1., 
                 contrastive_loss_weight = 1., 
-                forTraj=True, 
                 use_contrastive_loss=use_contrastive_loss,
             )
 
@@ -139,7 +142,7 @@ class Seq2SeqModule(pl.LightningModule):
     def training_step(self, batch, batch_idx: int):
         # TODO maybe implement scheduler change once backbone is unfreezed
 
-        prediction = self.net.forward(batch, decoder_mode=0) # decoder_mode: 0=teacher forcing, 1=running free, 2=scheduled sampling
+        prediction = self.net.forward(batch, decoder_mode=self.decoder_mode_training) # decoder_mode: 0=teacher forcing, 1=running free, 2=scheduled sampling
 
         train_loss, losses_it, metrics_it = self.net.compute_loss(prediction, batch, stage='train')
 
@@ -152,7 +155,7 @@ class Seq2SeqModule(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx: int) -> None:
 
-        prediction = self.net.forward(batch, decoder_mode=0) # decoder_mode: 0=teacher forcing, 1=running free, 2=scheduled sampling
+        prediction = self.net.forward(batch, decoder_mode=self.decoder_mode_validation) # decoder_mode: 0=teacher forcing, 1=running free, 2=scheduled sampling
 
         val_loss, losses_it, metrics_it = self.net.compute_loss(prediction, batch, stage='val')
 
@@ -300,22 +303,22 @@ class Seq2SeqModule(pl.LightningModule):
         # Print log
         print('\n\nTRAINING RESULT:')
         for key, val in self.train_losses_per_epoch.items():
-            print(key, ': ', val)
+            print(f'{key} :  {[round(v,5) for v in val]}')
         # for result in self.train_losses_per_epoch['loss']:
         #     print(result) 
         if self.train_metrics_per_epoch:
             for key, val in self.train_metrics_per_epoch.items():
-                print(key, ': ', val)
+                print(f'{key} :  {[round(v,5) for v in val]}')
             print('\n')
 
         print('VALIDATION RESULT:')
         for key, val in self.val_losses_per_epoch.items():
-            print(key, ': ', val)
+            print(f'{key} :  {[round(v,5) for v in val]}')
         # for result in self.val_losses_per_epoch['val_loss']:
         #     print(result)
         if self.val_metrics_per_epoch:
             for key, val in self.val_metrics_per_epoch.items():
-                print(key, ': ', val)
+                print(f'{key} :  {[round(v,5) for v in val]}')
         print('')
 
 

@@ -14,6 +14,8 @@ from helper import SEP, linemaker, dir_maker
 
 MULIT_GPU = False
 CUDA_DEVICE = 0
+MODE = 'MTM' # TRAJ_PRED, MTM
+DATA_FORMAT = 'tokenized' # by_frame, random, tokenized
 
 do_vision_pretraining = False
 do_training = True
@@ -22,6 +24,7 @@ save_model = False
 
 CONFIG = {
     # GENERAL
+    'mode': MODE, # TRAJ_PRED, MTM
     'arch': 'coca', # tf, coca, goal
     'img_arch': 'SegFormer', # BeIT, SegFormer
     'cuda_device': CUDA_DEVICE,
@@ -31,12 +34,12 @@ CONFIG = {
     'save_model': save_model,
     # TESTRUN
     'test_run': test_run,
-    'limit_dataset': 4 if test_run else 100,
+    'limit_dataset': 4 if test_run else 4,
     'limit_train_batches': 2 if test_run else None,
     'limit_val_batches': 2 if test_run else None,
     # DATALOADING
     'traj_quantity': 'pos', # pos, vel
-    'data_format' : 'tokenized', # by_frame, random, tokenized
+    'data_format' : DATA_FORMAT, # by_frame, random, tokenized
     'normalize_dataset': True,
     'seq_length': 20,
     'num_obs_steps': 8,

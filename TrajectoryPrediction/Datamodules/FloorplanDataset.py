@@ -37,43 +37,26 @@ class Dataset_Seq2Seq(Dataset):
         # TODO implement more sophisticated data loading from AgentFormer
         
         self.arch = config['arch']
-
+        self.mode = config['mode']
         self.data_format = config['data_format']
         self.traj_quantity = config['traj_quantity']
         assert self.data_format in ['random', 'by_frame', 'tokenized']
         assert self.traj_quantity in ['pos', 'vel']
-        
-        self.batch_size = 16 if self.arch == 'goal' else 1000 # 203 vs 1482 can I use the same batch size in the original tf? if not, some mistake... --> uses 10 GB for BS=1000
-        self.dataset_limit = None
-        
         self.seq_length = config['seq_length']
         
         self.split = split
-        
-        # self.data_augmentation = True if split == 'train' else False
-        self.data_augmentation = True
-
-        # self.dataset_folder = self.dataset_folder_rgb # os.path.join(self.dataset_folder_rgb, scene_name.split(SEP)[0], scene_name.split(SEP)[1])
-        # self.scene_folder = os.path.join(self.dataset_folder, self.name)
-
-        if not config['read_from_pickle']:
-            self.scenes = {i: Scene_floorplan(img_path, csv_path, verbose=False) for  i, (img_path, csv_path) in enumerate(tqdm(zip(img_list, csv_list), desc=f'[stage=={self.split}]\tLoading scenes...', total=len(img_list)))}# i, scene_name in enumerate(img_list)}
 
         self.transforms = transforms['transforms']
         self.img_size = transforms['feature_extractor_size']
-        
         assert self.img_size == 640, 'Resizing is necessary, either via torchvision (in Datamodule) or Albumentations (here in Dataset)!'
+
+        if not config['read_from_pickle']:
+            self.scenes = {i: Scene_floorplan(img_path, csv_path, verbose=False) for  i, (img_path, csv_path) in enumerate(tqdm(zip(img_list, csv_list), desc=f'[stage=={self.split}]\tLoading scenes...', total=len(img_list)))}# i, scene_name in enumerate(img_list)}
         
         # handcrafted for now...
         self.overall_mean = 320
         self.overall_std = 75
         self.normalize_dataset = config['normalize_dataset']
-
-        # Normalize coordinate system
-        # assert self.scenes[0].image_res_x == self.scenes[0].image_res_y
-        # self.shift_cs = self.scenes[0].image_res_x // 2
-
-        # self.final_resolution = 640
         self.max_floorplan_meters = 70
         
         self.dataset_statistics = {
@@ -97,10 +80,13 @@ class Dataset_Seq2Seq(Dataset):
         # self.overall_std = np.stack(stds).mean(0).mean() # not accounted yet for rotations...
 
         self.tokens = ['[PAD]', '[BOS]', '[EOS]', '[MASK]', '[TRAJ]', '[UNK]']
-        self.max_pads_per_seq = 5
-        self.fill_value = np.inf 
+        self.max_pads_per_seq = 9
+        self.fill_value = np.inf
+        self.mtm_mask_prob = 0.15
 
-        self.numerical_tokenization = False # REGRESSION TRANSFORMER: CONCURRENT CONDITIONAL GENERATION AND REGRESSION BY BLENDING NUMERICAL AND TEXTUAL TOKENS --> x & y to one or two tokens
+        self.numerical_tokenization = False # TODO REGRESSION TRANSFORMER: CONCURRENT CONDITIONAL GENERATION AND REGRESSION BY BLENDING NUMERICAL AND TEXTUAL TOKENS --> x & y to one or two tokens
+
+        self.max_traj_per_batch = 3000
 
         if config['read_from_pickle']:
             from pickle import Unpickler
@@ -119,40 +105,15 @@ class Dataset_Seq2Seq(Dataset):
                     path_tokens = [PREFIX]+path_tokens[1:]
                     item['scene_path'] = SEP.join(path_tokens) 
         elif self.data_format == 'by_frame':
+            assert self.mode == 'TRAJ_PRED', 'by_frame loading is only suitable for TRAJ_PRED mode!'
             self.read_by_frame_trajectory_loader()
         elif self.data_format == 'random':
+            assert self.mode == 'TRAJ_PRED', 'random loading is only suitable for TRAJ_PRED mode!'
             self.read_random_trajectory_loader()
         elif self.data_format == 'tokenized':
             self.read_tokenized_trajectory_loader()
         else:
             raise NotImplementedError
-
-        MAX_TRAJ_PER_BATCH = 3000
-        # Chunking batches to comply with maximum trajectories per batch (OOM issues...)
-        if MAX_TRAJ_PER_BATCH:
-            # print('S')
-            sequence_list = []
-            for item in tqdm(self.sequence_list, desc=f'[Chunking batches to maximum {MAX_TRAJ_PER_BATCH} sequence length]...'):
-                num_sequences = len(item['batch_of_sequences'])
-                if num_sequences <= MAX_TRAJ_PER_BATCH:
-                    sequence_list += [item]
-                else:
-                    sequences_per_scene = []
-                    if self.data_format == 'tokenized': tokens_per_scene = []
-                    
-                    for x in range(0, num_sequences, MAX_TRAJ_PER_BATCH):
-                        sequences_per_scene += [item['batch_of_sequences'][x:x+MAX_TRAJ_PER_BATCH]]
-                        if self.data_format == 'tokenized': tokens_per_scene += [item['tokenized_sequences'][x:x+MAX_TRAJ_PER_BATCH]]
-                    
-                    for ids, sequence_chunk in enumerate(sequences_per_scene):
-                        add_item = [{
-                            'batch_of_sequences': sequence_chunk,
-                            'scene_path': item['scene_path']
-                        }]
-                        if self.data_format == 'tokenized': add_item[0]['tokenized_sequences'] = tokens_per_scene[ids]
-                        sequence_list += add_item
-
-            self.sequence_list = sequence_list
         
         warnings.filterwarnings("ignore")
 
@@ -262,9 +223,6 @@ class Dataset_Seq2Seq(Dataset):
             self.statistics_per_scene.update({scene.RGB_image_path.split(SEP)[-1]: statistics_in_scene})
         
             considered_peds_per_scene.append(considered_peds_per_frame)
-        # considered_peds.append(considered_peds_per_scene)
-        if self.dataset_limit != None: 
-            self.sequence_list = self.sequence_list[:self.dataset_limit]
     
     
     def read_random_trajectory_loader(self):
@@ -309,28 +267,17 @@ class Dataset_Seq2Seq(Dataset):
 
             random.shuffle(sequences_per_scene)
 
-            self.sequence_list += [{
-                'batch_of_sequences': sequences_per_scene,
-                'scene_path': scene.RGB_image_path,
-                }]
-
-            """ self.sequence_list += [{
-                'batch_of_sequences': sequences_per_scene[x:x+self.batch_size],
-                'scene_path': scene.RGB_image_path,
-                'scene_data': {
-                    'scene_id': sc_id,
-                    # 'image_res_x': scene.image_res_x,
-                    # 'image_res_y': scene.image_res_y,
-                    # 'floorplan_min_x': scene.floorplan_min_x,
-                    # 'floorplan_min_y': scene.floorplan_min_y,
-                    # 'floorplan_max_x': scene.floorplan_max_x,
-                    # 'floorplan_max_y': scene.floorplan_max_y,
-                    },
-                'type': 'pos',
-                } for x in range(0, len(sequences_per_scene), self.batch_size)] """
-
-        if self.dataset_limit != None: 
-            self.sequence_list = self.sequence_list[:self.dataset_limit]
+            if len(sequences_per_scene) <= self.max_traj_per_batch:
+                self.sequence_list += [{
+                    'batch_of_sequences': sequences_per_scene,
+                    'scene_path': scene.RGB_image_path,
+                    }]
+            else:
+                for x in range(0, len(sequences_per_scene), self.max_traj_per_batch):
+                    self.sequence_list += [{
+                        'batch_of_sequences': sequences_per_scene[x:x+self.max_traj_per_batch],
+                        'scene_path': scene.RGB_image_path,
+                        }]
 
 
     def read_tokenized_trajectory_loader(self):
@@ -403,25 +350,40 @@ class Dataset_Seq2Seq(Dataset):
             sequence_tokens =  [agent_data[0] for agent_data in sequences_per_scene]
             sequences_coords = [agent_data[1] for agent_data in sequences_per_scene]
 
-            self.sequence_list += [{
-                'batch_of_sequences': sequences_coords,
-                'tokenized_sequences': sequence_tokens,
-                'scene_path': scene.RGB_image_path,
-                }]
+            if self.mode == 'MTM':
+                mtm_mask = np.random.choice(a=[False, True], size=(len(sequence_tokens), self.seq_length), p=[1-self.mtm_mask_prob, self.mtm_mask_prob])
 
-        hello = 1
+            # chunking into max_seq_length pieces to prevent OOM issues
+            if len(sequences_coords) <= self.max_traj_per_batch:
+                sequence_chunk = {
+                    'batch_of_sequences': sequences_coords,
+                    'tokenized_sequences': sequence_tokens,
+                    'scene_path': scene.RGB_image_path,
+                    }
+                if self.mode == 'MTM': sequence_chunk['mtm_mask'] = sparse.COO.from_numpy(mtm_mask, fill_value=False)
+                
+                self.sequence_list += [sequence_chunk]
+            
+            else:
+                for x in range(0, len(sequences_coords), self.max_traj_per_batch):
+                    sequence_chunk = {
+                        'batch_of_sequences': sequences_coords[x:x+self.max_traj_per_batch],
+                        'tokenized_sequences': sequence_tokens[x:x+self.max_traj_per_batch],
+                        'scene_path': scene.RGB_image_path,
+                    }
+                    if self.mode == 'MTM': sequence_chunk['mtm_mask'] = sparse.COO.from_numpy(mtm_mask[x:x+self.max_traj_per_batch], fill_value=False)
+                    
+                    self.sequence_list += [sequence_chunk]
 
 
     def __len__(self):
         return len(self.sequence_list)
 
 
-    def augment_traj_and_images_sparse(self, trajectories, np_image, augmentation):
+    def augment_traj_and_images_sparse(self, trajectories, np_image):
 
         # keypoints = list(map(tuple, trajectories.reshape(-1, 2)))
         keypoints = trajectories.reshape(-1, 2)
-        all_finites = np.isfinite(keypoints[:,0])
-        # keypoint_mask = keypoints[:, 0] != np.nan
 
         # flipping, transposing, random 90 deg rotations
         transform = A.Compose([
@@ -489,20 +451,21 @@ class Dataset_Seq2Seq(Dataset):
         sequence = self.sequence_list[idx] # 'scene_path': corr_cross\\0__floorplan_siteX_35_siteY_20_CORRWIDTH_3_SIDECORRWIDTH_20_numCross_2\\variation_56\\variation_56_num_agents_15.npz'
 
         abs_pixel_coord = np.stack(sequence['batch_of_sequences'], axis=0)
-        if self.data_format == 'tokenized':
-            tokenized_sequences = np.stack(sequence['tokenized_sequences'], axis=0)
        
         np_image = sparse.load_npz(sequence['scene_path']).todense()
         np_image = np_image.astype(np.float32) / 255. # normalization takes place down below....
         # TODO only way with this dataset for quick float 0. - 1. conversion, but light or dark area do not matter at all, only [1 0 0] or [0 1 0]
         
-        # batch_data = self.augment_traj_and_create_traj_maps(batch_data, np_image, self.data_augmentation)
-        batch_data = self.augment_traj_and_images_sparse(abs_pixel_coord, np_image, self.data_augmentation)
+        batch_data = self.augment_traj_and_images_sparse(abs_pixel_coord, np_image)
 
         if self.transforms:
             batch_data[0] = self.transforms(batch_data[0])
 
         if self.data_format == 'tokenized':
-            batch_data.append(tokenized_sequences)
+            batch_data.append(np.stack(sequence['tokenized_sequences'], axis=0))
+        if 'mtm_mask' in sequence:
+            mtm_mask = sequence['mtm_mask'].todense()
+            assert mtm_mask.shape == abs_pixel_coord[:,:,0].shape
+            batch_data.append(mtm_mask)
         
         return batch_data
