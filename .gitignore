@@ -12,3 +12,8 @@ Image2Image/Optimization/*
 *.mat
 *.pkl
 *pickle
+ObjectDetection/models/yolov5
+ObjectDetection/models/efficientdet-pytorch
+ObjectDetection/models/datasets
+ObjectDetection/checkpoints
+ObjectDetection/random_stuff.py
