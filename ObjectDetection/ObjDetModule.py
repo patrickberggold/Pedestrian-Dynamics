@@ -17,6 +17,7 @@ from torchvision.models.detection.roi_heads import fastrcnn_loss, maskrcnn_loss,
 from torchvision.models.detection.rpn import concat_box_prediction_layers
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 from decimal import Decimal
+from models.DETR.loss import compute_loss
 
 class ObjDetModule(pl.LightningModule):
     def __init__(
@@ -45,6 +46,7 @@ class ObjDetModule(pl.LightningModule):
         self.weight_decay = train_config['weight_decay']
         # self.additional_info = config['additional_info']
         self.model_ema_decay = train_config['model_ema_decay']
+        self.model_ema = None
         self.customized_optim = train_config['customized_optim']
 
         self.num_heads = 1
@@ -69,9 +71,9 @@ class ObjDetModule(pl.LightningModule):
             self.model = DetrForObjectDetection.from_pretrained("facebook/detr-resnet-50")
             # output_dim = 1 for regression, output_dim > 1 for classification (adjust model.config.num_labels accordingly)
             # output_dim = max_num_objects in the dataset (for facebook 91), num_queries = max_num_objects per image (detections padded with 'no object' entries)
-            self.model.class_labels_classifier = torch.nn.Linear(self.model.config.d_model, 2) # detection + no_detection
+            self.model.class_labels_classifier = torch.nn.Linear(self.model.config.d_model, self.config['num_classes']) # detection + no_detection
             self.model.model.query_position_embeddings = torch.nn.Embedding(20, self.model.config.d_model)
-            self.model.config.num_labels = 1 # detection
+            self.model.config.num_labels = self.config['num_classes'] # detection
         
         elif self.arch == 'FasterRCNN':
 
@@ -220,9 +222,11 @@ class ObjDetModule(pl.LightningModule):
             img, labels_b, bboxes_b, numAgentsIds_b = batch
 
             target = [{"class_labels": labels, "boxes": bboxes} for labels, bboxes in zip(labels_b, bboxes_b)]
-            prediction = self.model(img, labels=target)
+            # prediction = self.model(img, labels=target)
+            # train_loss = prediction.loss
 
-            train_loss = prediction.loss
+            prediction = self.model(img, labels=None)
+            train_loss = compute_loss(self.model, target, prediction.logits, prediction.pred_boxes, prediction.auxiliary_outputs)
 
         elif self.arch == 'EfficientDet':
             img, target, numAgentsIds_b = batch
@@ -273,12 +277,26 @@ class ObjDetModule(pl.LightningModule):
             map = metrics(true_boxes, true_labels, pred_boxes, pred_labels, confidences)
 
         elif self.arch == 'Detr':
-            img, labels_b, bboxes_b, numAgentsIds_b = batch
+            img, labels, bboxes, numAgentsIds_b = batch
 
-            target = [{"class_labels": labels, "boxes": bboxes} for labels, bboxes in zip(labels_b, bboxes_b)]
-            prediction = self.model(img, labels=target)
-        
-            val_loss = prediction.loss
+            target = [{"class_labels": labels, "boxes": bboxes} for labels, bboxes in zip(labels, bboxes)]
+            # prediction = self.model(img, labels=target)
+            # val_loss = prediction.loss
+
+            prediction = self.model(img, labels=None)
+            val_loss = compute_loss(self.model, target, prediction.logits, prediction.pred_boxes, prediction.auxiliary_outputs)
+
+            pred_boxes, pred_labels, confidences = [], [], []
+            for i in range(prediction.logits.size(0)):
+                scores = torch.max(prediction.logits[i], dim=-1).values
+                argmaxes = torch.argmax(prediction.logits[i], dim=-1)
+                pred_boxes.append(xywhn2xyxy(prediction.pred_boxes[i], self.img_max_height, self.img_max_width))
+                confidences.append(torch.softmax(scores, 0))
+                pred_labels.append(argmaxes.long().squeeze())
+            true_labels = labels
+            true_boxes = [xywhn2xyxy(box, self.img_max_height, self.img_max_width) for box in bboxes]
+
+            map = metrics(true_boxes, true_labels, pred_boxes, pred_labels, confidences)
         
         elif self.arch == 'EfficientDet':
             img, target, numAgentsIds_b = batch
@@ -338,7 +356,6 @@ class ObjDetModule(pl.LightningModule):
 
             true_labels, true_boxes = [], []
             unique_ids = target[:, 0].unique()
-            checksum = 0
             for id_ in unique_ids:
                 mask = target[:, 0] == id_
                 labels_i = target[mask, 1].long()
@@ -346,10 +363,6 @@ class ObjDetModule(pl.LightningModule):
                 boxes_i = xywhn2xyxy(boxes_i, self.img_max_height, self.img_max_width)
                 true_boxes.append(boxes_i)
                 true_labels.append(labels_i)
-                assert labels_i.size(0) == boxes_i.size(0)
-                checksum += torch.sum(mask)
-
-            assert checksum == target.size(0)
 
             map = metrics(true_boxes, true_labels, pred_boxes, pred_labels, confidences)
 
@@ -536,6 +549,14 @@ class ObjDetModule(pl.LightningModule):
     def on_before_zero_grad(self, *args, **kwargs):
         if self.model_ema:
             self.model_ema.update(self.model)
+        # total_norm = 0
+        # for p in self.model.parameters():
+        #     if p.grad is None:
+        #         continue
+        #     param_norm = p.grad.detach().data.norm(2)
+        #     total_norm += param_norm.item() ** 2
+        # total_norm = total_norm ** 0.5 if total_norm != 0 else 0.0
+        # print(f'grad norm: {total_norm}')
     
     # For customized schedulers
     def custom_step_EffDet(self, scheduler, optimizer_idx, metric):

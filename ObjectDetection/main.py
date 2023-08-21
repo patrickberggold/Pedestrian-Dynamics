@@ -12,10 +12,10 @@ from helper import SEP, dir_maker, update_config
 
 CUDA_DEVICE = 0
 BATCH_SIZE = 4
-ARCH = 'EfficientDet' # Detr, FasterRCNN, FasterRCNN_custom, EfficientDet, YoloV5
+ARCH = 'Detr' # Detr, FasterRCNN, FasterRCNN_custom, EfficientDet, YoloV5
 
 test_run = False # limit_batches -> 2 
-save_model = True # create folder and save the model
+save_model = False # create folder and save the model
 
 CONFIG = {
     'arch': ARCH, # DeepLab, BeIT, SegFormer
@@ -23,7 +23,7 @@ CONFIG = {
     'cuda_device': CUDA_DEVICE,
     'batch_size': BATCH_SIZE,
     'from_ckpt_path': None, # 'EffDet-D4_onYellow_1024p_pretrained_black', # 'Yolo_onOrigins', # 'FirstTry_FasterRCNN_wMAP_corrupted', # None, FirstTry_FasterRCNN
-    'load_to_ckpt_path': 'EffDet-D5_custom_1024p_pretrained_black_larger', # FirstTry_FasterRCNN_onlyBoxes
+    'load_to_ckpt_path': 'Detr_1024p_black', # FirstTry_FasterRCNN_onlyBoxes
     'early_stopping_patience': 50,
     'run_test_epoch': test_run,
     'limit_dataset': None, 
@@ -35,7 +35,7 @@ update_config(CONFIG)
 # TODO: massively extend the black dataset
 TRAIN_DICT = {
     # Learning rate and schedulers
-    'learning_rate': 0.005, 
+    'learning_rate': 0.001, 
     'lr_scheduler': 'ReduceLROnPlateau', 
     'lr_sch_step_size4lr_step': 8,
     'lr_sch_step_size4cosAnneal': 100,
@@ -45,10 +45,11 @@ TRAIN_DICT = {
     # optimizer
     'opt': 'Adam',
     'weight_decay': None, # 1e-6,
+    'gradient_clip': 100.,
     # (un)freezing layers
     'unfreeze_backbone_at_epoch': None, # not implemented yet
-    'model_ema_decay': 0.999966, # None
-    'customized_optim': True
+    'model_ema_decay': None, # 0.999966, # None
+    'customized_optim': False #True
 }
 
 do_training = True
@@ -120,6 +121,7 @@ if __name__ == '__main__':
             limit_train_batches=limit_batches,
             limit_val_batches=limit_batches,
             # progress_bar_refresh_rate=125,
+            gradient_clip_val=TRAIN_DICT['gradient_clip'],
             )
 
         start_training_time = time.time()

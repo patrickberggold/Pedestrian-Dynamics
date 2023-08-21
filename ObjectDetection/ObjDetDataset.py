@@ -94,6 +94,10 @@ class ObjDetDataset(Dataset):
             bboxes = xyxy2xywhn(bboxes, self.img_max_height, self.img_max_width)
             assert 1.0 >= np.max(bboxes)
         
+        elif self.arch=='Detr':
+            bboxes = xyxy2xywhn(bboxes, self.img_max_height, self.img_max_width)
+            assert 1.0 >= np.max(bboxes)
+        
         img = torch.tensor(img).permute(2, 0, 1).float()
         bboxes = torch.tensor(bboxes).float()#.unsqueeze(0)
         labels = torch.tensor(labels).long()
@@ -101,16 +105,17 @@ class ObjDetDataset(Dataset):
 
         # self.visualize(img, bboxes, labels, {1: 'Detection'})
 
-        if format == 'pascal_voc' and bboxes.nelement() != 0 and self.arch=='Detr':
-            # from pascal to coco (required by DETR)
-            assert (bboxes[:, 0] <= bboxes[:, 2]).all(), 'x_s dont fit'
-            assert (bboxes[:, 1] <= bboxes[:, 3]).all(), 'y_s dont fit'
-            x_c = (bboxes[:, 0] + bboxes[:, 2]) / 2.
-            y_c = (bboxes[:, 1] + bboxes[:, 3]) / 2.
-            w = bboxes[:, 2] - bboxes[:, 0]
-            h = bboxes[:, 3] - bboxes[:, 1]
+        # if format == 'pascal_voc' and bboxes.nelement() != 0 and self.arch=='Detr':
+        #     # from pascal to coco (required by DETR)
+        #     assert (bboxes[:, 0] <= bboxes[:, 2]).all(), 'x_s dont fit'
+        #     assert (bboxes[:, 1] <= bboxes[:, 3]).all(), 'y_s dont fit'
+        #     x_c = (bboxes[:, 0] + bboxes[:, 2]) / 2.
+        #     y_c = (bboxes[:, 1] + bboxes[:, 3]) / 2.
+        #     w = bboxes[:, 2] - bboxes[:, 0]
+        #     h = bboxes[:, 3] - bboxes[:, 1]
 
-            bboxes = torch.stack([x_c, y_c, w, h], dim=-1)
+        #     bboxes = torch.stack([x_c, y_c, w, h], dim=-1)
+        #     bboxes = xyxy2xywhn(bboxes, self.img_max_height, self.img_max_width)
 
         if self.transform:
             img = self.transform(img)
