@@ -67,13 +67,26 @@ class ObjDetModule(pl.LightningModule):
         self.img_max_width, self.img_max_height = config['img_max_size']
 
         if self.arch == 'Detr':
-            from transformers import DetrForObjectDetection
+            from transformers import DetrForObjectDetection, DetrConfig
             self.model = DetrForObjectDetection.from_pretrained("facebook/detr-resnet-50")
+            # self.model = DetrForObjectDetection(DetrConfig.from_pretrained("facebook/detr-resnet-50"))
             # output_dim = 1 for regression, output_dim > 1 for classification (adjust model.config.num_labels accordingly)
             # output_dim = max_num_objects in the dataset (for facebook 91), num_queries = max_num_objects per image (detections padded with 'no object' entries)
-            self.model.class_labels_classifier = torch.nn.Linear(self.model.config.d_model, self.config['num_classes']) # detection + no_detection
-            self.model.model.query_position_embeddings = torch.nn.Embedding(20, self.model.config.d_model)
-            self.model.config.num_labels = self.config['num_classes'] # detection
+            self.model.class_labels_classifier = torch.nn.Linear(self.model.config.d_model, self.config['num_classes'] + 1) # detection + no_detection
+            if self.config['top_k'] != self.model.model.query_position_embeddings.num_embeddings:
+                self.model.model.query_position_embeddings = torch.nn.Embedding(self.config['top_k'], self.model.config.d_model)
+            self.model.config.num_labels = self.config['num_classes']
+            def init_fct(m):
+                try:
+                    if hasattr(m, 'weight'):
+                        torch.nn.init.normal_(m.weight, mean=0, std=0.1)
+                        # torch.nn.init.xavier_normal_(m.weight)
+                        # torch.nn.init.uniform_(m.weight, -0.1, 0.1)
+                    elif hasattr(m, 'bias'):
+                        m.bias.data.zero_()
+                except ValueError:
+                    m.weight.data.zero_()
+            # self.model.apply(init_fct)
         
         elif self.arch == 'FasterRCNN':
 
@@ -222,11 +235,13 @@ class ObjDetModule(pl.LightningModule):
             img, labels_b, bboxes_b, numAgentsIds_b = batch
 
             target = [{"class_labels": labels, "boxes": bboxes} for labels, bboxes in zip(labels_b, bboxes_b)]
-            # prediction = self.model(img, labels=target)
-            # train_loss = prediction.loss
+            prediction = self.model(img, labels=target)
+            train_loss = prediction.loss
 
-            prediction = self.model(img, labels=None)
-            train_loss = compute_loss(self.model, target, prediction.logits, prediction.pred_boxes, prediction.auxiliary_outputs)
+            self.internal_log({'train_loss': train_loss, 'loss_ce': prediction.loss_dict['loss_ce'], 'loss_bbox': prediction.loss_dict['loss_bbox'], 'loss_giou': prediction.loss_dict['loss_giou']}, stage='train')
+
+            # prediction = self.model(img, labels=None)
+            # train_loss = compute_loss(self.model, target, prediction.logits, prediction.pred_boxes, prediction.auxiliary_outputs)
 
         elif self.arch == 'EfficientDet':
             img, target, numAgentsIds_b = batch
@@ -246,7 +261,7 @@ class ObjDetModule(pl.LightningModule):
             train_out = self.model(img)
             train_loss, loss_items = self.loss_fn(train_out, target)
 
-        self.internal_log({'train_loss': train_loss}, stage='train')
+        if self.arch != 'Detr': self.internal_log({'train_loss': train_loss}, stage='train')
         self.log('loss', train_loss, on_step=False, on_epoch=True, logger=False)
         
         return {'loss' : train_loss}
@@ -280,24 +295,42 @@ class ObjDetModule(pl.LightningModule):
             img, labels, bboxes, numAgentsIds_b = batch
 
             target = [{"class_labels": labels, "boxes": bboxes} for labels, bboxes in zip(labels, bboxes)]
-            # prediction = self.model(img, labels=target)
-            # val_loss = prediction.loss
+            prediction = self.model(img, labels=target)
+            val_loss = prediction.loss
 
-            prediction = self.model(img, labels=None)
-            val_loss = compute_loss(self.model, target, prediction.logits, prediction.pred_boxes, prediction.auxiliary_outputs)
+            # prediction = self.model(img, labels=None)
+            # val_loss = compute_loss(self.model, target, prediction.logits, prediction.pred_boxes, prediction.auxiliary_outputs)
+
+            # from https://colab.research.google.com/github/facebookresearch/detr/blob/colab/notebooks/detr_demo.ipynb#scrollTo=BiwSmd2i-Wkf
+            # probas = outputs['pred_logits'].softmax(-1)[0, :, :-1]
+            # keep = probas.max(-1).values > 0.7
 
             pred_boxes, pred_labels, confidences = [], [], []
             for i in range(prediction.logits.size(0)):
                 scores = torch.max(prediction.logits[i], dim=-1).values
                 argmaxes = torch.argmax(prediction.logits[i], dim=-1)
-                pred_boxes.append(xywhn2xyxy(prediction.pred_boxes[i], self.img_max_height, self.img_max_width))
-                confidences.append(torch.softmax(scores, 0))
-                pred_labels.append(argmaxes.long().squeeze())
+                # select only boxes with class 0 (class 1 == 'no-object')
+                # argmaxes = torch.ones_like(argmaxes)
+                box_detection_indices = torch.argwhere(argmaxes == 0).squeeze()
+                
+                selected_boxes = prediction.pred_boxes[i][box_detection_indices]
+                selected_labels = argmaxes[box_detection_indices]
+                selected_scores = scores[box_detection_indices]
+                if selected_scores.ndim==0:
+                    selected_boxes, selected_labels, selected_scores = selected_boxes.unsqueeze(0), selected_labels.unsqueeze(0), selected_scores.unsqueeze(0)
+                # print(f'selection length: {selected_scores.size(0)}')
+
+                pred_boxes.append(xywhn2xyxy(selected_boxes, self.img_max_height, self.img_max_width))
+                confidences.append(torch.softmax(selected_scores, 0))
+                pred_labels.append(selected_labels.long())
+            
             true_labels = labels
             true_boxes = [xywhn2xyxy(box, self.img_max_height, self.img_max_width) for box in bboxes]
 
             map = metrics(true_boxes, true_labels, pred_boxes, pred_labels, confidences)
-        
+
+            self.internal_log({'val_loss': val_loss, 'loss_ce': prediction.loss_dict['loss_ce'], 'loss_bbox': prediction.loss_dict['loss_bbox'], 'loss_giou': prediction.loss_dict['loss_giou'], 'AP': map}, stage='val')
+
         elif self.arch == 'EfficientDet':
             img, target, numAgentsIds_b = batch
             labels_b, bboxes_b = target['gt_targets']
@@ -366,7 +399,7 @@ class ObjDetModule(pl.LightningModule):
 
             map = metrics(true_boxes, true_labels, pred_boxes, pred_labels, confidences)
 
-        self.internal_log({'val_loss': val_loss, 'AP': map}, stage='val')
+        if self.arch != 'Detr': self.internal_log({'val_loss': val_loss, 'AP': map}, stage='val')
         
         self.log('val_loss', val_loss, on_step=False, on_epoch=True, prog_bar=True, logger=False)
 
@@ -484,7 +517,21 @@ class ObjDetModule(pl.LightningModule):
                 sch = LambdaLR(opt, lambdaLR_with_warmup, verbose=True)
 
                 return [opt], [sch]
-                        
+
+            elif self.arch == 'Detr':
+                param_dicts = [
+                    {"params": [p for n, p in self.named_parameters() if "backbone" not in n]},
+                    {"params": [p for n, p in self.named_parameters() if "backbone" in n], "lr": 1e-5}
+                ]
+                opt = Adam(param_dicts, lr=self.learning_rate)
+                sch = ReduceLROnPlateau(opt, factor=self.lr_sch_gamma4redOnPlat_and_stepLR, patience=self.lr_sch_patience4redOnPlat, verbose=True)
+                # Because of a weird issue with ReduceLROnPlateau, the monitored value needs to be returned... See https://github.com/PyTorchLightning/pytorch-lightning/issues/4454
+                # if self.mode == 'evac': raise NotImplementedError('how to implement here for two optimizers')
+                return {
+                    'optimizer': opt,
+                    'lr_scheduler': sch,
+                    'monitor': 'val_loss'
+                }
             else:
                 raise NotImplementedError()
                 
@@ -568,41 +615,32 @@ class ObjDetModule(pl.LightningModule):
         # return super().on_fit_start()
         print(f"\nFREEZE STRATEGY INITIALIZED IN EPOCH {self.current_epoch}\n")
         module_list = list(self.model._modules.keys())
-        for key, module in self.model._modules.items():
-            if key == 'auxiliary_head': continue
-
-            # if key not in ['evac_predictor', 'marriage_att', 'evac_preprocess']:
-            #     for p in module.parameters():
-            #         p.requires_grad = False
-            # else:
-            #     for k, m in module._modules.items():
-            #         if k != 'classifier':
-            #             for pp in m.parameters():
-            #                 pp.requires_grad = False
-
-            # if key in ['decode_head']:
-            #     for p in module.parameters():
-            #         p.requires_grad = False
-            
-            # if key != 'high_res_net':
-            #     for p in module.parameters():
-            #         p.requires_grad = False
-            # if key != 'evac_head': # 'classifier':
-            #     for p in module.parameters():
-            #         p.requires_grad = False
-            # else:
-            #     for k, m in module._modules.items():
-            #         if k == 'classifier':
-            #             for pp in m.parameters():
-            #                 pp.requires_grad = False
-            # continue
+        for param in self.parameters():
+            param.requires_grad = True
+        # for key, module in self.model._modules.items():
+        #     if key == 'auxiliary_head': continue
+        #     if key == 'model':
+        #         for p in module.parameters():
+        #             p.requires_grad = False
+        #     else:
+        #         for p in module.parameters():
+        #             p.requires_grad = True
         return super().on_fit_start()
 
-    def on_train_epoch_start(self) -> None:        
-        if self.current_epoch == 8:
-            print(f'\n\nUnfreezing all parameters in epoch {self.current_epoch}...')
-            for param in self.parameters():
-                param.requires_grad = True
+    def on_train_epoch_start(self) -> None:
+        if self.current_epoch == 3:
+            print(f'\nFreezing model at epoch {self.current_epoch}\n')
+            for key, module in self.model._modules.items():
+                if key == 'model':
+                    for p in module.parameters():
+                        p.requires_grad = False
+            # for param in self.parameters():
+            #     param.requires_grad = True
+
+        # if self.current_epoch == 8:
+        #     print(f'\n\nUnfreezing all parameters in epoch {self.current_epoch}...')
+        #     for param in self.parameters():
+        #         param.requires_grad = True
 
         if self.trainer.state.stage in ['sanity_check']: return super().on_epoch_end()
         
@@ -645,7 +683,7 @@ class ObjDetModule(pl.LightningModule):
                     train_string += f'\n{i_epoch}:\t{Decimal(train_vals[i_loss][i_epoch]):.5e}'
                     # print(f"{Decimal('0.0000000201452342000'):.8e}")
                 else:
-                    train_string += f'\t\t\t{Decimal(train_vals[i_loss][i_epoch]):.5e}'
+                    train_string += f'\t\t{Decimal(train_vals[i_loss][i_epoch]):.5e}'
         print(train_string) 
 
 
@@ -664,7 +702,7 @@ class ObjDetModule(pl.LightningModule):
                     val_string += f'\n{i_epoch}:\t{Decimal(val_vals[i_loss][i_epoch]):.5e}'
                 else:
                     # val_string += f'\t\t\t{val_vals[i_loss][i_epoch]:.5f}'
-                    val_string += f'\t\t\t{Decimal(val_vals[i_loss][i_epoch]):.5e}'
+                    val_string += f'\t\t{Decimal(val_vals[i_loss][i_epoch]):.5e}'
         print(val_string) 
         
     
