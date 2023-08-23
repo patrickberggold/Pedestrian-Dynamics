@@ -8,7 +8,7 @@ import pytorch_lightning as pl
 # import numpy as np
 from sklearn.metrics import confusion_matrix
 # import matplotlib.pyplot as plt
-from helper import SEP, xywhn2xyxy, xywh2xyxy
+from helper import SEP, xywhn2xyxy, xywh2xyxy, xyxyn2xyxy
 from torchvision.models.detection.faster_rcnn import FasterRCNN
 from collections import OrderedDict
 from typing import Tuple, List
@@ -94,22 +94,10 @@ class ObjDetModule(pl.LightningModule):
             from helper import validate_faster_rcnn_with_loss
 
             pretrained_backbone = True
-            self.model = fasterrcnn_resnet50_fpn(pretrained=False, progress=True, num_classes=self.config['num_classes'], pretrained_backbone=pretrained_backbone, trainable_backbone_layers=None)
+            self.model = fasterrcnn_resnet50_fpn(pretrained=False, progress=True, num_classes=self.config['num_classes'] + 1, pretrained_backbone=pretrained_backbone, trainable_backbone_layers=None)
 
             validate_faster_rcnn_with_loss(self.model)
 
-            import torchvision
-            from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-
-            model = torchvision.models.detection.fasterrcnn_resnet50_fpn(weights="DEFAULT")
-
-            # replace the classifier with a new one, that has
-            # num_classes which is user-defined
-            num_classes = 2  # 1 class (person) + background
-            # get number of input features for the classifier
-            in_features = model.roi_heads.box_predictor.cls_score.in_features
-            # replace the pre-trained head with a new one
-            model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
 
         elif self.arch == 'FasterRCNN_custom':
 
@@ -120,7 +108,7 @@ class ObjDetModule(pl.LightningModule):
             trainable_backbone_layers = _validate_trainable_layers(True, None, 5, 3)
             backbone = resnet50(pretrained=True, progress=True, norm_layer=misc_nn_ops.FrozenBatchNorm2d)
             backbone = _resnet_fpn_extractor(backbone, trainable_backbone_layers)
-            self.model = FasterRCNN_custom(backbone, self.config['num_classes'])
+            self.model = FasterRCNN_custom(backbone, self.config['num_classes'] + 1)
 
         elif self.arch == 'YoloV5':
             """ from ultralytics_yolov5 """
@@ -150,7 +138,7 @@ class ObjDetModule(pl.LightningModule):
             self.model.nc = self.config['num_classes']  # attach number of classes to model
             self.model.hyp = hyp  # attach hyperparameters to model
             
-            pretrained = True
+            pretrained = False
             if pretrained:
                 print('Using pre-trained model...')
                 # download models at: https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5m.pt
@@ -225,7 +213,7 @@ class ObjDetModule(pl.LightningModule):
             for i in range(len(img)):
                 d = {}
                 d['boxes'] = bboxes_b[i]
-                d['labels'] = labels_b[i]
+                d['labels'] = torch.ones_like(labels_b[i])
                 targets.append(d)
 
             losses = self.model(images, targets) if self.arch == 'FasterRCNN' else self.model(images, numAgentsIds_b, targets)
@@ -280,13 +268,21 @@ class ObjDetModule(pl.LightningModule):
                 d['labels'] = labels_b[i]
                 targets.append(d)
             
-            losses, predictions = self.model(images, targets) if self.arch == 'FasterRCNN' else self.model(images, numAgentsIds_b, targets)
+            losses, prediction = self.model(images, targets) if self.arch == 'FasterRCNN' else self.model(images, numAgentsIds_b, targets)
             val_loss = sum([losses[k] for k in losses])
             
-            # predictions = self.model(images, numAgentsIds_b, targets)
-            pred_boxes = [o["boxes"] for o in predictions]
-            confidences = [o["scores"] for o in predictions]
-            pred_labels = [o["labels"] for o in predictions]
+            # prediction = self.model(images, numAgentsIds_b, targets)
+            pred_boxes, confidences, pred_labels = [],[],[]
+            for pred in prediction:
+                # selected_ids = torch.argwhere(pred["labels"] == 1).squeeze()
+                b = pred["boxes"]#[selected_ids]
+                s = pred["scores"]#[selected_ids]
+                l = pred["labels"]#[selected_ids]
+                if s.ndim == 0:
+                    b, s, l = b.unsqueeze(0), s.unsqueeze(0), l.unsqueeze(0)
+                pred_boxes.append(b)
+                confidences.append(s)
+                pred_labels.append(l)
             true_labels = labels_b
             true_boxes = bboxes_b
             map = metrics(true_boxes, true_labels, pred_boxes, pred_labels, confidences)
@@ -350,10 +346,11 @@ class ObjDetModule(pl.LightningModule):
             pred_boxes, pred_labels, confidences = [], [], []
             for i in range(predictions.size(0)):
                 p = predictions[i]
-                t_size = 20 # target['gt_targets'][0][i].size(0)
-                pred_boxes.append(p[:t_size, :4])
-                confidences.append(p[:t_size, 4:5].squeeze())
-                pred_labels.append(p[:t_size, 5:6].long().squeeze() - 1) # in EffDet/PyTorch 0 is background
+                # pred_boxes.append(xyxyn2xyxy(p[:, :4], self.img_max_height, self.img_max_width))
+                selected_ids = torch.argwhere(p[:, 5] == 1).squeeze()
+                pred_boxes.append(p[:, :4][selected_ids])
+                confidences.append(p[:, 4:5][selected_ids].squeeze())
+                pred_labels.append(p[:, 5][selected_ids].long()) # in EffDet/PyTorch 0 is background
 
             true_labels, true_boxes = target['gt_targets']
 
@@ -382,7 +379,7 @@ class ObjDetModule(pl.LightningModule):
             
             pred_boxes, pred_labels, confidences = [], [], []
             for p in predictions:
-                p_box = boxes_i = xywhn2xyxy(p[:,:4], self.img_max_height, self.img_max_width)
+                p_box = xywhn2xyxy(p[:,:4], self.img_max_height, self.img_max_width)
                 pred_boxes.append(p_box)
                 confidences.append(p[:, 4:5].squeeze())
                 pred_labels.append(p[:, 5:6].long().squeeze())
