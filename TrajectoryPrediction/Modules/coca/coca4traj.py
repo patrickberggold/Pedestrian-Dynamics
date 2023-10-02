@@ -166,9 +166,9 @@ class ParallelTransformerBlock(nn.Module):
         q = rearrange(q, "b n (h d) -> b h n d", h=h) # q gets same shape as q in vanilla TF with [4, 8, 512, 64] instead of [4, 8, 7, 64]
 
         # rotary embeddings
-
-        # positions = self.get_rotary_embedding(n, device)
-        # q, k = map(lambda t: apply_rotary_pos_emb(positions, t), (q, k))
+        # assert False, 'Why was this commented'
+        positions = self.get_rotary_embedding(n, device)
+        q, k = map(lambda t: apply_rotary_pos_emb(positions, t), (q, k))
 
         # scale
 
@@ -313,13 +313,8 @@ class CoCa4Traj(nn.Module):
     ):
         # TODO: 
         # - compare with/without caption loss
-        # - BOS and other tokens
         # - implement & compare exposure bias mitigation methods
-        # - implement & compare other non-autoregressive decoders
-        # - try with embedding (unique id per coord + start/end/pad)
         # - cuda OOM issue during inference https://discuss.pytorch.org/t/train-transformer-without-teacher-forcing/132938/2
-        # - pretraining TF: https://d2l.ai/chapter_attention-mechanisms-and-transformers/large-pretraining-transformers.html
-            # - Encoder via masking (see BERT), Enc-Dec via reconstruction (using noise see BART, or using multitask unification see T5)
             
         super().__init__()
         self.dim = dim
@@ -708,7 +703,7 @@ class CoCa4Traj(nn.Module):
             contrastive_loss = (F.cross_entropy(sim, contrastive_labels) + F.cross_entropy(sim.t(), contrastive_labels)) * 0.5
             contrastive_loss = contrastive_loss * self.contrastive_loss_weight
 
-            caption_loss = F.mse_loss(logits.squeeze(), labels)
+            caption_loss = F.mse_loss(logits.squeeze(), label_coords)
             caption_loss = caption_loss * self.caption_loss_weight
 
             total_loss = caption_loss + contrastive_loss

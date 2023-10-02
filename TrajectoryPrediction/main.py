@@ -13,13 +13,13 @@ from helper import SEP, linemaker, dir_maker
 # from hyperparameter_optim import hyperparameter_optimization
 
 MULIT_GPU = False
-CUDA_DEVICE = 0
-MODE = 'MTM' # TRAJ_PRED, MTM
-DATA_FORMAT = 'tokenized' # by_frame, random, tokenized
+CUDA_DEVICE = 1
+MODE = 'TRAJ_PRED' # TRAJ_PRED, MTM
+DATA_FORMAT = 'random' # by_frame, random, tokenized
 
 do_vision_pretraining = False
 do_training = True
-test_run = False
+test_run = True
 save_model = False
 
 CONFIG = {
@@ -30,11 +30,11 @@ CONFIG = {
     'cuda_device': CUDA_DEVICE,
     'imgs_per_batch': 1,
     'load_from_ckpt': None, # 'coca_ff_mult1_wholeDS_pos_random_normalized_epoch=1-step=38654.ckpt',
-    'save_ckpt': 'coca_ff_mult1_wholeDS_pos_random_normalized_WSL_+1',
+    'save_ckpt': 'coca_new', # 'coca_ff_mult1_wholeDS_pos_random_normalized_WSL_+1',
     'save_model': save_model,
     # TESTRUN
     'test_run': test_run,
-    'limit_dataset': 4 if test_run else 4,
+    'limit_dataset': None,
     'limit_train_batches': 2 if test_run else None,
     'limit_val_batches': 2 if test_run else None,
     # DATALOADING
@@ -46,7 +46,7 @@ CONFIG = {
     'read_from_pickle': False,
 }
 
-description_log = ''
+description_log = 'Standard CoCa for presentation purposes (random, TRAJ_PRED, 8-20 split)'
 if (not test_run) and save_model:
     store_folder_path = SEP.join(['TrajectoryPrediction', 'checkpoints', CONFIG['save_ckpt']])
     dir_maker(store_folder_path, description_log)
@@ -62,29 +62,30 @@ if __name__ == '__main__':
         quit()
 
     datamodule = FloorplanDatamodule(config=CONFIG)
-    datamodule.setup('train')
+
     if do_training:
 
         module = Seq2SeqModule(config=CONFIG, learning_rate=5e-4, lr_scheduler='ReduceLROnPlateau', lr_sch_gamma=0.3)
-        module_state_dict = module.state_dict()
 
         if CONFIG['load_from_ckpt']:
             CKPT_PATH = SEP.join(['TrajectoryPrediction', 'checkpoints', CONFIG['load_from_ckpt']])
-            state_dict = OrderedDict([(key, tensor) for key, tensor in torch.load(CKPT_PATH)['state_dict'].items()])
+            model_file_path = [file for file in os.listdir(CKPT_PATH) if file.endswith('.ckpt') and not file.startswith('last')]
+            assert len(model_file_path) == 1
+            CKPT_PATH = SEP.join([CKPT_PATH, model_file_path[0]])
+            state_dict = torch.load(CKPT_PATH)['state_dict']
+            module_state_dict = module.state_dict()
 
             mkeys_missing_in_loaded = [module_key for module_key in list(module_state_dict.keys()) if module_key not in list(state_dict.keys())]
             lkeys_missing_in_module = [loaded_key for loaded_key in list(state_dict.keys()) if loaded_key not in list(module_state_dict.keys())]
+            assert len(mkeys_missing_in_loaded) < 10 or len(lkeys_missing_in_module) < 10, 'Checkpoint loading went probably wrong...'
 
             load_dict = OrderedDict()
             for key, tensor in module_state_dict.items():
-                # if (key in state_dict.keys()) and ('decode_head' not in key):
-                if key in state_dict.keys():
+                if key in state_dict.keys() and tensor.size()==state_dict[key].size():
                     load_dict[key] = state_dict[key]
                 else:
                     # if key == 'model.model.classifier.classifier.weight':
                     #     load_dict[key] = state_dict['model.model.classifier.weight']
-                    # elif key == 'model.model.classifier.classifier.bias': 
-                    #     load_dict[key] = state_dict['model.model.classifier.bias']
                     # else:
                     #     load_dict[key] = tensor
                     load_dict[key] = tensor
@@ -93,15 +94,15 @@ if __name__ == '__main__':
 
         callbacks = [EarlyStopping(monitor="val_loss", mode="min", patience=8), LearningRateMonitor(logging_interval='epoch')]
 
-        if (not test_run) and save_model:
+        if (not CONFIG['run_test_epoch']) and save_model:
             model_checkpoint = ModelCheckpoint(
                 dirpath = store_folder_path,
                 filename = 'model_{epoch}-{step}',
                 save_top_k = 1,
-                save_last = False, # True,
                 verbose = True, 
                 monitor = 'val_loss',
                 mode = 'min',
+                save_last=False
             )
             callbacks.append(model_checkpoint) # TODO print lr each epoch for checking + turn of lightning logger if possible
 

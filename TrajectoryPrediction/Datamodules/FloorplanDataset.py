@@ -86,7 +86,7 @@ class Dataset_Seq2Seq(Dataset):
 
         self.numerical_tokenization = False # TODO REGRESSION TRANSFORMER: CONCURRENT CONDITIONAL GENERATION AND REGRESSION BY BLENDING NUMERICAL AND TEXTUAL TOKENS --> x & y to one or two tokens
 
-        self.max_traj_per_batch = 3000
+        self.max_traj_per_batch = 1000
 
         if config['read_from_pickle']:
             from pickle import Unpickler
@@ -96,8 +96,20 @@ class Dataset_Seq2Seq(Dataset):
             with open(store_path, 'rb') as handle:
                 total = os.path.getsize(store_path)
                 # self.sequence_list = pickle.load(handle)
+                assert self.mode == 'TRAJ_PRED' and self.data_format != 'tokenized', 'batch chunking with self.max_traj_per_batch not implemented for tokens yet!'
                 with TQDMBytesReader(handle, total=total) as pbhandle:
                     self.sequence_list =  Unpickler(pbhandle).load()
+                sequences = []
+                for sequence in self.sequence_list:
+                    if len(sequence['batch_of_sequences']) <= self.max_traj_per_batch:
+                        sequences += [sequence]
+                    else:
+                        for x in range(0, len(sequence['batch_of_sequences']), self.max_traj_per_batch):
+                            sequences += [{
+                                'batch_of_sequences': sequence['batch_of_sequences'][x:x+self.max_traj_per_batch],
+                                'scene_path': sequence['scene_path'],
+                                }]
+                self.sequence_list = sequences
                 print(f'Loaded {split} dataset!')
             if OPSYS=='Linux':
                 for item in self.sequence_list:
@@ -352,7 +364,10 @@ class Dataset_Seq2Seq(Dataset):
 
             if self.mode == 'MTM':
                 mtm_mask = np.random.choice(a=[False, True], size=(len(sequence_tokens), self.seq_length), p=[1-self.mtm_mask_prob, self.mtm_mask_prob])
-
+                # TODO 80% of the time, replace with [MASK], 10% of the time, replace random word, 10% of the time, keep same
+                # TODO reconstruct entire trajectory or only masked tokens --> maybe concentration on only masks better?
+                # TODO what if encoder always deletes the first token and replaces it with generated one in last position -> no decoder necessary? 
+                # TODO also do GPT-2 (pre)training: always start from <BOS>, <init coord>?
             # chunking into max_seq_length pieces to prevent OOM issues
             if len(sequences_coords) <= self.max_traj_per_batch:
                 sequence_chunk = {

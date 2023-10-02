@@ -17,3 +17,4 @@ ObjectDetection/models/efficientdet-pytorch
 ObjectDetection/models/datasets
 ObjectDetection/checkpoints
 ObjectDetection/random_stuff.py
+TrajectoryPrediction/checkpoints
