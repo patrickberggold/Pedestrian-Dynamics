@@ -3,7 +3,7 @@ import pytorch_lightning as pl
 from torchvision.transforms import Compose, Normalize, Resize, ToTensor
 from torch.utils.data import DataLoader
 import os, random
-from ObjDetDataset import ObjDetDataset
+from ObjDetDataset import ObjDetDataset, augment_on_batch_level
 from helper import SEP, PREFIX
 
 # line extraction
@@ -32,13 +32,14 @@ class ObjDetDatamodule(pl.LightningDataModule):
         self.limit_dataset = config['limit_dataset']
         self.num_workers = num_workers
         self.transforms = None
+        self.augment_batch_level = config['augment_batch_level']
 
-        assert self.arch in ['Detr', 'FasterRCNN', 'FasterRCNN_custom', 'YoloV5', 'EfficientDet']
+        assert self.arch in ['Detr', 'Detr_custom', 'FasterRCNN', 'FasterRCNN_custom', 'YoloV5', 'EfficientDet']
 
         if self.arch == 'Detr':
             from transformers import DetrFeatureExtractor
             feature_extractor = DetrFeatureExtractor.from_pretrained("facebook/detr-resnet-50")
-            self.img_size = (960, 3200)
+            self.img_size = self.config['img_max_size'] # (960, 3200)
             self.transforms = Normalize(mean=feature_extractor.image_mean, std=feature_extractor.image_std)
         elif self.arch == 'EfficientDet':
             pass
@@ -54,6 +55,7 @@ class ObjDetDatamodule(pl.LightningDataModule):
         self.train_dataset = ObjDetDataset(self.config, self.train_imgs_list, self.train_targets_list, transform=self.transforms, batch_size = self.batch_size)
         self.val_dataset = ObjDetDataset(self.config, self.val_imgs_list, self.val_targets_list, transform=self.transforms, batch_size = self.batch_size)
         self.test_dataset = ObjDetDataset(self.config, self.test_imgs_list, self.test_targets_list, transform=self.transforms, batch_size = self.batch_size)
+        self.inference_dataset = ObjDetDataset(self.config, self.inference_imgs_list, self.inference_targets_list, transform=self.transforms, batch_size = self.batch_size)
 
     def train_dataloader(self):
         if self.arch=='EfficientDet':
@@ -81,11 +83,16 @@ class ObjDetDatamodule(pl.LightningDataModule):
             return DataLoader(self.test_dataset, batch_size=self.batch_size, collate_fn=self.custom_collate)
         
 
-    # def predict_dataloader(self):
-    #     return DataLoader(self.mnist_predict, batch_size=self.batch_size)
+    def predict_dataloader(self):
+        if self.arch in ['EfficientDet', 'YoloV5']: return NotImplementedError
+        return DataLoader(self.inference_dataset, batch_size=1, collate_fn=self.custom_collate)
+    
 
     def custom_collate(self, batch):
-        images, labels, bboxes, numAgentsIds = zip(*batch) 
+        if self.augment_batch_level:
+            return augment_on_batch_level(batch, self.config, self.transforms)
+        else:
+            images, labels, bboxes, numAgentsIds = zip(*batch)
         return torch.stack(images, dim=0), labels, bboxes, torch.LongTensor(numAgentsIds)
     
 
@@ -113,7 +120,7 @@ class ObjDetDatamodule(pl.LightningDataModule):
     def set_data_paths(self):
         
         # self.splits = [0.7, 0.15, 0.15]
-        self.splits = [0.75, 0.2, 0.05]
+        self.splits = [0.75, 0.25, 0.0]
 
         self.img_path = 'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\images'
         # self.img_path = 'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\images_transformed'
@@ -121,11 +128,16 @@ class ObjDetDatamodule(pl.LightningDataModule):
         self.boxes_temp = 'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\boxes_temp_corrected'
 
         # for now use yellow rectangles:
-        self.img_path = 'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\images_rectangles_black_mode_larger'
-        self.boxes_temp = 'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\boxes_rectangles_black_mode_larger'
-   
-   
+        self.img_path = 'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\images_rectangles_black_mode' #_larger'
+        self.boxes_temp = 'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\boxes_rectangles_black_mode' #_larger'
+
+        self.img_path = 'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\U9-Trackline_V3_Complete-Data'
+        self.boxes_temp = 'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\U9-Trackline_V3_boxes'
+        self.img_path = 'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\U9-Trackline_V3_Input_Images'
+        self.boxes_temp = 'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\crowdit-V3\\konvertiert'
+
         self.set_filepaths()
+        self.set_inference_paths()
 
         assert len(self.img_list) == len(self.bboxes), 'Images list and trajectory list do not have same length, something went wrong!'
         # Randomly check if entries are the same
@@ -140,6 +152,9 @@ class ObjDetDatamodule(pl.LightningDataModule):
         
         val_split_index = int(len(self.indices) * val_split_factor)
         test_split_index = int(len(self.indices) * test_split_factor)
+        # to the next batch size divisible
+        # val_split_index = ((len(self.indices) * val_split_factor + self.batch_size - 1) // self.batch_size) * self.batch_size
+        # test_split_index = ((len(self.indices) * test_split_factor + self.batch_size - 1) // self.batch_size) * self.batch_size
         
         random.seed(42)
         random.shuffle(self.indices)
@@ -150,8 +165,11 @@ class ObjDetDatamodule(pl.LightningDataModule):
         self.val_imgs_list = [self.img_list[idx] for idx in self.indices[test_split_index:(test_split_index + val_split_index)]]
         self.val_targets_list = [self.bboxes[idx] for idx in self.indices[test_split_index:(test_split_index + val_split_index)]]
 
-        self.test_imgs_list = [self.img_list[idx] for idx in self.indices[:test_split_index]]
-        self.test_targets_list = [self.bboxes[idx] for idx in self.indices[:test_split_index]]
+        self.test_imgs_list = self.img_list_inference # [self.img_list[idx] for idx in self.indices[:test_split_index]]
+        self.test_targets_list = self.bboxes_inference # [self.bboxes[idx] for idx in self.indices[:test_split_index]]
+
+        self.inference_imgs_list = self.img_list_inference
+        self.inference_targets_list = self.bboxes_inference
 
         # LIMIT THE DATASET
         if self.limit_dataset:
@@ -165,13 +183,48 @@ class ObjDetDatamodule(pl.LightningDataModule):
             self.test_imgs_list = self.test_imgs_list[:self.limit_dataset//4]
             self.test_targets_list = self.test_targets_list[:self.limit_dataset//4]
 
+
     def set_filepaths(self):
 
         self.img_list = []
         self.crowdit_list = []
         self.bboxes = []
 
-        if self.img_path.endswith('larger'):
+        if self.boxes_temp.endswith('konvertiert'):
+            from tqdm import tqdm
+            box_dir = [d for d in os.listdir(self.boxes_temp) if d.endswith('_res') and d.split('_')[4][1:] in ['10', '30', '50']]
+            img_dir = [d for d in os.listdir(self.img_path) if '_A10' in d]
+            assert len(box_dir) == len(img_dir)*3
+            for b in tqdm(box_dir):
+                img_file = b.replace('_res', '.png')
+                if '_A30' in img_file: 
+                    img_file = img_file.replace('_A30', '_A10')
+                elif '_A50' in img_file:
+                    img_file = img_file.replace('_A50', '_A10')
+                img_file = os.path.join(self.img_path, img_file)
+                box_file = os.path.join(self.boxes_temp, b, 'criticalAreas.txt')
+
+                boxes_per_file = []
+                f = open(box_file, "r")
+                file_lines = f.readlines()
+                for line in file_lines:
+                    x1, y1, x2, y2 = line.strip().split(',')
+                    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                    boxes_per_file.append([x1, y1, x2, y2])
+                f.close()
+                boxes_per_file.append(b.split('_')[4][1:])
+                # if b.split('_')[4][1:] == '10':
+                #     continue
+                self.bboxes.append(boxes_per_file)
+                self.img_list.append(img_file)
+
+
+            return
+
+            # for img_file, box_file in tqdm(zip(img_dir, box_dir), total=len(box_dir)):
+
+
+        elif self.img_path.endswith('larger'):
             from tqdm import tqdm
             assert len(os.listdir(self.img_path)) == len(os.listdir(self.boxes_temp))
             for img_file, box_file in tqdm(zip(os.listdir(self.img_path), os.listdir(self.boxes_temp)), total=len(os.listdir(self.img_path))):
@@ -185,6 +238,23 @@ class ObjDetDatamodule(pl.LightningDataModule):
                 self.bboxes.append(boxes_per_file)
                 self.img_list.append(os.path.join(self.img_path, img_file))
 
+            return
+
+        elif self.img_path.endswith('Input_Images'):
+            from tqdm import tqdm
+            assert len(os.listdir(self.img_path)) == len(os.listdir(self.boxes_temp))
+            for img_file, box_file in tqdm(zip(os.listdir(self.img_path), os.listdir(self.boxes_temp)), total=len(os.listdir(self.img_path))):
+                assert img_file.replace('.png','') == box_file.replace('.txt','')
+                if 'A30' in box_file: continue
+                f = open(os.path.join(self.boxes_temp, box_file), 'r')
+                lines = f.readlines()
+                boxes_per_file = []
+                for line in lines:
+                    box_str = line.strip().split(',')
+                    boxes_per_file += [[int(b) if int(b)>0 else 0 for b in box_str]]
+                boxes_per_file.append(img_file.split('_')[-2][1:].zfill(3))
+                self.bboxes.append(boxes_per_file)
+                self.img_list.append(os.path.join(self.img_path, img_file))
             return
 
         # x_dict = {}
@@ -504,6 +574,35 @@ class ObjDetDatamodule(pl.LightningDataModule):
         quit()
         stop = 3
         """
+
+
+    def set_inference_paths(self):
+        self.img_list_inference = []
+        self.bboxes_inference = []
+        self.img_inference_paths = [
+            'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\U9-Trackline-V3-2SBSS\\U9-Trackline-V3-2SBSS_refined_blacked.jpg',
+            'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\U9-Trackline-V3-U9\\Modell_U9_colored_blacked.jpg'
+        ]
+        
+        for img_path in self.img_inference_paths:
+            all_result_runs_folder = img_path.replace(img_path.split(SEP)[-1], 'results_updated')
+            assert os.path.isdir(all_result_runs_folder)
+            dir_list = [d for d in os.listdir(all_result_runs_folder) if d.endswith('_res')]
+
+            for result_folder in dir_list:
+                self.img_list_inference.append(img_path)
+                boxes_per_file = []
+
+                f = open(os.path.join(all_result_runs_folder, result_folder, 'criticalAreas.txt'), 'r')
+                bboxes_lines = f.readlines()
+                for line in bboxes_lines:
+                    x1, y1, x2, y2 = line.strip().split(',')
+                    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                    boxes_per_file.append([x1, y1, x2, y2])
+
+                boxes_per_file.append(result_folder.split('_A')[-1][:2])
+                self.bboxes_inference.append(boxes_per_file)
+                f.close()
 
 
     def extract_lines(self, img):

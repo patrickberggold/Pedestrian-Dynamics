@@ -59,7 +59,7 @@ def validate_faster_rcnn_with_loss(faster_rcnn_model: GeneralizedRCNN):
         num_images = len(anchors)
         num_anchors_per_level_shape_tensors = [o[0].shape for o in objectness]
         num_anchors_per_level = [s[0] * s[1] * s[2] for s in num_anchors_per_level_shape_tensors]
-        objectness, pred_bbox_deltas = concat_box_prediction_layers(objectness, pred_bbox_deltas)
+        objectness, pred_bbox_deltas = concat_box_prediction_layers(objectness, pred_bbox_deltas) # after here
         # apply pred_bbox_deltas to anchors to obtain the decoded proposals
         # note that we detach the deltas because Faster R-CNN do not backprop through
         # the proposals
@@ -291,6 +291,24 @@ def xywhn2xyxy(x, w=640, h=640, padw=0, padh=0):
     y[..., 1] = h * (x[..., 1] - x[..., 3] / 2) + padh  # top left y
     y[..., 2] = w * (x[..., 0] + x[..., 2] / 2) + padw  # bottom right x
     y[..., 3] = h * (x[..., 1] + x[..., 3] / 2) + padh  # bottom right y
+    return y
+
+
+def xyxy2xyxyn(x, w, h):
+    y = x.clone() if isinstance(x, torch.Tensor) else np.copy(x)
+    y[..., 0] = x[..., 0] / w 
+    y[..., 1] = x[..., 1] / h 
+    y[..., 2] = x[..., 2] / w  
+    y[..., 3] = x[..., 3] / h
+    return y
+
+
+def xyxyn2xyxy(x, w, h):
+    y = x.clone() if isinstance(x, torch.Tensor) else np.copy(x)
+    y[..., 0] = x[..., 0] * w 
+    y[..., 1] = x[..., 1] * h 
+    y[..., 2] = x[..., 2] * w  
+    y[..., 3] = x[..., 3] * h
     return y
 
 

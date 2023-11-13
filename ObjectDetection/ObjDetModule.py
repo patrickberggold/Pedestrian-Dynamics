@@ -1,23 +1,15 @@
 import torch
-from torch import Tensor
-from torch.nn import functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR, ExponentialLR, ReduceLROnPlateau, LambdaLR
 from torch.optim import Adam, AdamW, SGD
 import pytorch_lightning as pl
-# from torchsummary import summary
-# import numpy as np
-from sklearn.metrics import confusion_matrix
-# import matplotlib.pyplot as plt
 from helper import SEP, xywhn2xyxy, xywh2xyxy, xyxyn2xyxy
-from torchvision.models.detection.faster_rcnn import FasterRCNN
-from collections import OrderedDict
-from typing import Tuple, List
-import warnings
-from torchvision.models.detection.roi_heads import fastrcnn_loss, maskrcnn_loss, keypointrcnn_loss
-from torchvision.models.detection.rpn import concat_box_prediction_layers
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
+from torchmetrics.classification import BinaryPrecisionRecallCurve
 from decimal import Decimal
-from models.DETR.loss import compute_loss
+import numpy as np
+import warnings
+from sklearn.metrics import average_precision_score, auc
+
 
 class ObjDetModule(pl.LightningModule):
     def __init__(
@@ -29,9 +21,10 @@ class ObjDetModule(pl.LightningModule):
         # self.mode = config['mode']
         self.arch = config['arch']
         self.config = config
+        self.batch_size = config['batch_size']
         
         # assert self.mode in ['grayscale', 'evac_only', 'class_movie', 'density_reg', 'density_class', 'denseClass_wEvac'], 'Unknown mode setting!'
-        assert self.arch in ['Detr', 'FasterRCNN', 'FasterRCNN_custom', 'EfficientDet', 'YoloV5'], 'Unknown arch setting!'
+        assert self.arch in ['Detr', 'Detr_custom', 'FasterRCNN', 'FasterRCNN_custom', 'EfficientDet', 'YoloV5'], 'Unknown arch setting!'
 
         self.learning_rate = train_config['learning_rate']
         self.lr_scheduler = train_config['lr_scheduler']
@@ -59,10 +52,11 @@ class ObjDetModule(pl.LightningModule):
         
         self.log_result = {'validation': [], 'training': []}
         self.backbone_frozen = False
-        self.confusion_matrix_train_epoch = None
-        self.confusion_matrix_val_epoch = None
         self.tversky_weights = None
-
+        self.post_inference_call = True
+        self.num_use_cases = 2
+        self.pred_boxes, self.pred_labels, self.confidences = [], [], []
+        self.true_boxes, self.true_labels = [], []
 
         self.img_max_width, self.img_max_height = config['img_max_size']
 
@@ -87,28 +81,40 @@ class ObjDetModule(pl.LightningModule):
                 except ValueError:
                     m.weight.data.zero_()
             # self.model.apply(init_fct)
+
+        elif self.arch == "Detr_custom":
+            from models.Detr_custom import Detr_custom
+            self.model = Detr_custom.from_pretrained("facebook/detr-resnet-50")
+            self.model.update_model(self.config)
         
         elif self.arch == 'FasterRCNN':
 
-            from torchvision.models.detection.faster_rcnn import fasterrcnn_resnet50_fpn
+            # from torchvision.models.detection.faster_rcnn import fasterrcnn_resnet50_fpn
+            # self.model = fasterrcnn_resnet50_fpn(pretrained=False, progress=True, num_classes=self.config['num_classes'] + 1, pretrained_backbone=pretrained_backbone, trainable_backbone_layers=None)
             from helper import validate_faster_rcnn_with_loss
+            from torchvision.models.detection.backbone_utils import _resnet_fpn_extractor, _validate_trainable_layers
+            from torchvision.models.resnet import resnet50
+            from torchvision.models.detection import FasterRCNN
+            from torchvision.ops import misc as misc_nn_ops
 
             pretrained_backbone = True
-            self.model = fasterrcnn_resnet50_fpn(pretrained=False, progress=True, num_classes=self.config['num_classes'] + 1, pretrained_backbone=pretrained_backbone, trainable_backbone_layers=None)
+            pretrained=False
+            trainable_backbone_layers=None
+            num_classes=self.config['num_classes'] + 1
+
+            trainable_backbone_layers = _validate_trainable_layers(
+                pretrained or pretrained_backbone, trainable_backbone_layers, 5, 3
+            )
+
+            backbone = resnet50(pretrained=pretrained_backbone, progress=True, norm_layer=misc_nn_ops.FrozenBatchNorm2d)
+            backbone = _resnet_fpn_extractor(backbone, trainable_backbone_layers)
+            self.model = FasterRCNN(backbone, num_classes, box_score_thresh=0.5, box_nms_thresh=0.0)
 
             validate_faster_rcnn_with_loss(self.model)
 
-
         elif self.arch == 'FasterRCNN_custom':
-
-            from torchvision.models.detection.backbone_utils import _resnet_fpn_extractor, _validate_trainable_layers
-            from torchvision.ops import misc as misc_nn_ops
-            from torchvision.models.resnet import resnet50
-
-            trainable_backbone_layers = _validate_trainable_layers(True, None, 5, 3)
-            backbone = resnet50(pretrained=True, progress=True, norm_layer=misc_nn_ops.FrozenBatchNorm2d)
-            backbone = _resnet_fpn_extractor(backbone, trainable_backbone_layers)
-            self.model = FasterRCNN_custom(backbone, self.config['num_classes'] + 1)
+            from models.FasterRCNN_custom import FasterRCNN_custom
+            self.model = FasterRCNN_custom(backbone=None, num_classes=self.config['num_classes'] + 1, config=self.config)
 
         elif self.arch == 'YoloV5':
             """ from ultralytics_yolov5 """
@@ -219,14 +225,15 @@ class ObjDetModule(pl.LightningModule):
             losses = self.model(images, targets) if self.arch == 'FasterRCNN' else self.model(images, numAgentsIds_b, targets)
             train_loss = sum([losses[k] for k in losses])
         
-        elif self.arch == 'Detr':
-            img, labels_b, bboxes_b, numAgentsIds_b = batch
+        elif self.arch in ['Detr', 'Detr_custom']:
+            img, labels, bboxes, numAgentsIds = batch
 
-            target = [{"class_labels": labels, "boxes": bboxes} for labels, bboxes in zip(labels_b, bboxes_b)]
-            prediction = self.model(img, labels=target)
+            target = [{"class_labels": l, "boxes": b} for l, b in zip(labels, bboxes)]
+            prediction = self.model(img, labels=target) if self.arch == 'Detr' else self.model(img, numAgentsIds, labels=target)
             train_loss = prediction.loss
 
-            self.internal_log({'train_loss': train_loss, 'loss_ce': prediction.loss_dict['loss_ce'], 'loss_bbox': prediction.loss_dict['loss_bbox'], 'loss_giou': prediction.loss_dict['loss_giou']}, stage='train')
+            # self.internal_log({'train_loss': train_loss, 'loss_ce': prediction.loss_dict['loss_ce'], 'loss_bbox': prediction.loss_dict['loss_bbox'], 'loss_giou': prediction.loss_dict['loss_giou']}, stage='train')
+            # self.internal_log({'train_loss': train_loss}, stage='train')
 
             # prediction = self.model(img, labels=None)
             # train_loss = compute_loss(self.model, target, prediction.logits, prediction.pred_boxes, prediction.auxiliary_outputs)
@@ -249,7 +256,7 @@ class ObjDetModule(pl.LightningModule):
             train_out = self.model(img)
             train_loss, loss_items = self.loss_fn(train_out, target)
 
-        if self.arch != 'Detr': self.internal_log({'train_loss': train_loss}, stage='train')
+        self.internal_log({'train_loss': train_loss}, stage='train')
         self.log('loss', train_loss, on_step=False, on_epoch=True, logger=False)
         
         return {'loss' : train_loss}
@@ -272,7 +279,6 @@ class ObjDetModule(pl.LightningModule):
             val_loss = sum([losses[k] for k in losses])
             
             # prediction = self.model(images, numAgentsIds_b, targets)
-            pred_boxes, confidences, pred_labels = [],[],[]
             for pred in prediction:
                 # selected_ids = torch.argwhere(pred["labels"] == 1).squeeze()
                 b = pred["boxes"]#[selected_ids]
@@ -280,18 +286,18 @@ class ObjDetModule(pl.LightningModule):
                 l = pred["labels"]#[selected_ids]
                 if s.ndim == 0:
                     b, s, l = b.unsqueeze(0), s.unsqueeze(0), l.unsqueeze(0)
-                pred_boxes.append(b)
-                confidences.append(s)
-                pred_labels.append(l)
-            true_labels = labels_b
-            true_boxes = bboxes_b
-            map = metrics(true_boxes, true_labels, pred_boxes, pred_labels, confidences)
+                self.pred_boxes += [b]
+                self.confidences += [s]
+                self.pred_labels += [l]
+            self.true_labels += labels_b
+            self.true_boxes += bboxes_b
+            # map, f1_score _ = metrics_sklearn(true_boxes, true_labels, pred_boxes, pred_labels, confidences)
 
-        elif self.arch == 'Detr':
-            img, labels, bboxes, numAgentsIds_b = batch
+        elif self.arch in ['Detr', 'Detr_custom']:
+            img, labels, bboxes, numAgentsIds = batch
 
-            target = [{"class_labels": labels, "boxes": bboxes} for labels, bboxes in zip(labels, bboxes)]
-            prediction = self.model(img, labels=target)
+            target = [{"class_labels": l, "boxes": b} for l, b in zip(labels, bboxes)]
+            prediction = self.model(img, labels=target) if self.arch == 'Detr' else self.model(img, numAgentsIds, labels=target)
             val_loss = prediction.loss
 
             # prediction = self.model(img, labels=None)
@@ -301,31 +307,32 @@ class ObjDetModule(pl.LightningModule):
             # probas = outputs['pred_logits'].softmax(-1)[0, :, :-1]
             # keep = probas.max(-1).values > 0.7
 
-            pred_boxes, pred_labels, confidences = [], [], []
             for i in range(prediction.logits.size(0)):
-                scores = torch.max(prediction.logits[i], dim=-1).values
-                argmaxes = torch.argmax(prediction.logits[i], dim=-1)
-                # select only boxes with class 0 (class 1 == 'no-object')
-                # argmaxes = torch.ones_like(argmaxes)
-                box_detection_indices = torch.argwhere(argmaxes == 0).squeeze()
-                
-                selected_boxes = prediction.pred_boxes[i][box_detection_indices]
-                selected_labels = argmaxes[box_detection_indices]
-                selected_scores = scores[box_detection_indices]
+                scores = torch.softmax(prediction.logits[i].detach(), dim=-1)
+                argmaxes = torch.argmax(scores, dim=-1)
+                # box_detection_indices_o = torch.argwhere(argmaxes == 0).squeeze() # select only boxes with class 0 (class 1 == 'no-object')
+                box_detection_indices = torch.argwhere((argmaxes == 0) & (scores[:, 0] > 0.7)).squeeze() # select only boxes with class 0 (class 1 == 'no-object')
+                selected_scores = scores[box_detection_indices, 0]
+                assert torch.all(selected_scores > scores[box_detection_indices,1])
+                box_proposals_per_batch = prediction.pred_boxes[i].detach()
+                selected_boxes = box_proposals_per_batch[box_detection_indices]
+                selected_labels = argmaxes[box_detection_indices].detach()
+
+                # for score predictions consisting of a single number
                 if selected_scores.ndim==0:
                     selected_boxes, selected_labels, selected_scores = selected_boxes.unsqueeze(0), selected_labels.unsqueeze(0), selected_scores.unsqueeze(0)
                 # print(f'selection length: {selected_scores.size(0)}')
 
-                pred_boxes.append(xywhn2xyxy(selected_boxes, self.img_max_height, self.img_max_width))
-                confidences.append(torch.softmax(selected_scores, 0))
-                pred_labels.append(selected_labels.long())
+                self.pred_boxes += [xywhn2xyxy(selected_boxes, img.size(3), img.size(2))] # 2048, 789
+                self.confidences += [selected_scores]
+                self.pred_labels += [selected_labels.long()]
             
-            true_labels = labels
-            true_boxes = [xywhn2xyxy(box, self.img_max_height, self.img_max_width) for box in bboxes]
+            self.true_labels += labels
+            self.true_boxes += [xywhn2xyxy(box, img.size(3), img.size(2)) for box in bboxes]
 
-            map = metrics(true_boxes, true_labels, pred_boxes, pred_labels, confidences)
+            # map, f1_score, _ = metrics_sklearn(true_boxes, true_labels, pred_boxes, pred_labels, confidences)
 
-            self.internal_log({'val_loss': val_loss, 'loss_ce': prediction.loss_dict['loss_ce'], 'loss_bbox': prediction.loss_dict['loss_bbox'], 'loss_giou': prediction.loss_dict['loss_giou'], 'AP': map}, stage='val')
+            # self.internal_log({'val_loss': val_loss, 'AP': map}, stage='val')
 
         elif self.arch == 'EfficientDet':
             img, target, numAgentsIds_b = batch
@@ -354,7 +361,7 @@ class ObjDetModule(pl.LightningModule):
 
             true_labels, true_boxes = target['gt_targets']
 
-            map = metrics(true_boxes, true_labels, pred_boxes, pred_labels, confidences) # confidences of 0.1 or 0.95 doesnt make a difference, 
+            map, f1_score, _ = metrics_sklearn(true_boxes, true_labels, pred_boxes, pred_labels, confidences) # confidences of 0.1 or 0.95 doesnt make a difference, 
             h = 2
             # map = torch.FloatTensor([0.5])
             ###########################
@@ -394,21 +401,78 @@ class ObjDetModule(pl.LightningModule):
                 true_boxes.append(boxes_i)
                 true_labels.append(labels_i)
 
-            map = metrics(true_boxes, true_labels, pred_boxes, pred_labels, confidences)
+            map, f1_score, _ = metrics_sklearn(true_boxes, true_labels, pred_boxes, pred_labels, confidences)
 
-        if self.arch != 'Detr': self.internal_log({'val_loss': val_loss, 'AP': map}, stage='val')
+        self.internal_log({'val_loss': val_loss}, stage='val')
         
         self.log('val_loss', val_loss, on_step=False, on_epoch=True, prog_bar=True, logger=False)
 
         return {'val_loss': val_loss}
 
 
+    def test_step(self, batch):
+        if self.arch in ['FasterRCNN', 'FasterRCNN_custom']:
+            img, labels_b, bboxes_b, numAgentsIds_b = batch
+
+            images = list(image for image in img)
+            targets = []
+            for i in range(len(img)):
+                d = {}
+                d['boxes'] = bboxes_b[i]
+                d['labels'] = labels_b[i]
+                targets.append(d)
+            
+            losses, prediction = self.model(images, targets) if self.arch == 'FasterRCNN' else self.model(images, numAgentsIds_b, targets)
+            
+            # prediction = self.model(images, numAgentsIds_b, targets)
+            for pred in prediction:
+                # selected_ids = torch.argwhere(pred["labels"] == 1).squeeze()
+                b = pred["boxes"]#[selected_ids]
+                s = pred["scores"]#[selected_ids]
+                l = pred["labels"]#[selected_ids]
+                if s.ndim == 0:
+                    b, s, l = b.unsqueeze(0), s.unsqueeze(0), l.unsqueeze(0)
+                self.pred_boxes_test += [b]
+                self.confidences_test += [s]
+                self.pred_labels_test += [l]
+            self.true_labels_test += labels_b
+            self.true_boxes_test += bboxes_b
+            # map, f1_score, _ = metrics_sklearn(true_boxes, true_labels, pred_boxes, pred_labels, confidences)
+
+        elif self.arch in ['Detr', 'Detr_custom']:
+            img, labels, bboxes, numAgentsIds = batch
+
+            target = [{"class_labels": l, "boxes": b} for l, b in zip(labels, bboxes)]
+            prediction = self.model(img, labels=target) if self.arch == 'Detr' else self.model(img, numAgentsIds, labels=target)
+
+            for i in range(prediction.logits.size(0)):
+                scores = torch.softmax(prediction.logits[i].detach(), dim=-1)
+                argmaxes = torch.argmax(scores, dim=-1)
+                box_detection_indices = torch.argwhere(argmaxes == 0).squeeze() # select only boxes with class 0 (class 1 == 'no-object')
+                selected_scores = scores[box_detection_indices, 0]
+                assert torch.all(selected_scores > scores[box_detection_indices,1])
+                box_proposals_per_batch = prediction.pred_boxes[i].detach()
+                selected_boxes = box_proposals_per_batch[box_detection_indices]
+                selected_labels = argmaxes[box_detection_indices].detach()
+
+                if selected_scores.ndim==0:
+                    selected_boxes, selected_labels, selected_scores = selected_boxes.unsqueeze(0), selected_labels.unsqueeze(0), selected_scores.unsqueeze(0)
+
+                self.pred_boxes_test += [xywhn2xyxy(selected_boxes, img.size(3), img.size(2))] # 2048, 789
+                self.confidences_test += [selected_scores]
+                self.pred_labels_test += [selected_labels.long()]
+            
+            self.true_labels_test += labels
+            self.true_boxes_test += [xywhn2xyxy(box, img.size(3), img.size(2)) for box in bboxes]
+
+    
     def internal_log(self, losses_it, stage):
         if self.trainer.state.stage == 'sanity_check': return
 
         losses_logger = self.train_losses if stage=='train' else self.val_losses
 
         for key, val in losses_it.items():
+            if isinstance(val, torch.Tensor): val = val.detach()
             if key not in losses_logger:
                 losses_logger.update({key: [val]})
             else:
@@ -515,7 +579,7 @@ class ObjDetModule(pl.LightningModule):
 
                 return [opt], [sch]
 
-            elif self.arch == 'Detr':
+            elif self.arch in ['Detr', 'Detr_custom']:
                 param_dicts = [
                     {"params": [p for n, p in self.named_parameters() if "backbone" not in n]},
                     {"params": [p for n, p in self.named_parameters() if "backbone" in n], "lr": 1e-5}
@@ -625,12 +689,12 @@ class ObjDetModule(pl.LightningModule):
         return super().on_fit_start()
 
     def on_train_epoch_start(self) -> None:
-        if self.current_epoch == 3:
-            print(f'\nFreezing model at epoch {self.current_epoch}\n')
-            for key, module in self.model._modules.items():
-                if key == 'model':
-                    for p in module.parameters():
-                        p.requires_grad = False
+        # if self.current_epoch == 0:
+        #     print(f'\nFreezing model at epoch {self.current_epoch}\n')
+        #     for key, module in self.model._modules.items():
+        #         if key == 'model':
+        #             for p in module.parameters():
+        #                 p.requires_grad = False
             # for param in self.parameters():
             #     param.requires_grad = True
 
@@ -639,11 +703,32 @@ class ObjDetModule(pl.LightningModule):
         #     for param in self.parameters():
         #         param.requires_grad = True
 
-        if self.trainer.state.stage in ['sanity_check']: return super().on_epoch_end()
+        if self.trainer.state.stage in ['sanity_check']: return super().on_train_epoch_end()
         
         if self.current_epoch > 0: 
             self.print_logs()
     
+
+    def on_validation_epoch_end(self) -> None:
+        if not self.trainer.state.stage == 'sanity_check':
+            map, f1_score, _ = metrics_sklearn(self.true_boxes, self.true_labels, self.pred_boxes, self.pred_labels, self.confidences)
+            self.internal_log({'AP': map}, stage='val')
+            self.true_boxes, self.true_labels, self.pred_boxes, self.pred_labels, self.confidences = [], [], [], [], []
+            self.true_boxes_test, self.true_labels_test, self.pred_boxes_test, self.pred_labels_test, self.confidences_test = [], [], [], [], []
+            if self.post_inference_call:
+                # assert all parameters are in eval mode right now
+                assert not self.model.training
+                # call the test dataloader
+                test_dataloader = self.trainer.datamodule.test_dataloader()
+                for batch in test_dataloader:
+                    batch_d = (batch[0].to(self.device), tuple([l.to(self.device) for l in batch[1]]), tuple([b.to(self.device) for b in batch[2]]), batch[3].to(self.device))
+                    self.test_step(batch_d) 
+                map_sbahn, f1_score_sbahn, _ = metrics_sklearn(self.true_boxes_test[:3], self.true_labels_test[:3], self.pred_boxes_test[:3], self.pred_labels_test[:3], self.confidences_test[:3], verbose=True)
+                map_u9, f1_score_u9, _ = metrics_sklearn(self.true_boxes_test[3:], self.true_labels_test[3:], self.pred_boxes_test[3:], self.pred_labels_test[3:], self.confidences_test[3:], verbose=True)
+                self.internal_log({'AP S-Bahn': map_sbahn}, stage='val')
+                self.internal_log({'AP U9': map_u9}, stage='val')
+        return super().on_validation_epoch_end()
+
 
     def print_logs(self):
         # Training Logs
@@ -677,10 +762,10 @@ class ObjDetModule(pl.LightningModule):
         for i_epoch in range(len(train_vals[0])):
             for i_loss in range(len(train_vals)):
                 if i_loss == 0:
-                    train_string += f'\n{i_epoch}:\t{Decimal(train_vals[i_loss][i_epoch]):.5e}'
+                    train_string += f'\n{i_epoch}:\t{Decimal(train_vals[i_loss][i_epoch]):.3e}'
                     # print(f"{Decimal('0.0000000201452342000'):.8e}")
                 else:
-                    train_string += f'\t\t{Decimal(train_vals[i_loss][i_epoch]):.5e}'
+                    train_string += f'\t\t{Decimal(train_vals[i_loss][i_epoch]):.3e}'
         print(train_string) 
 
 
@@ -696,391 +781,305 @@ class ObjDetModule(pl.LightningModule):
             for i_loss in range(len(val_vals)):
                 if i_loss == 0:
                     # val_string += f'\n{i_epoch}:\t{val_vals[i_loss][i_epoch]:.5f}'
-                    val_string += f'\n{i_epoch}:\t{Decimal(val_vals[i_loss][i_epoch]):.5e}'
+                    val_string += f'\n{i_epoch}:\t{Decimal(val_vals[i_loss][i_epoch]):.3e}'
                 else:
                     # val_string += f'\t\t\t{val_vals[i_loss][i_epoch]:.5f}'
-                    val_string += f'\t\t{Decimal(val_vals[i_loss][i_epoch]):.5e}'
+                    val_string += f'\t\t{Decimal(val_vals[i_loss][i_epoch]):.3e}'
         print(val_string) 
-        
+
+
+def metrics_sklearn(true_boxes, true_labels, pred_boxes, pred_labels, confidences, return_curve = False, verbose = False):
+    # for precision-recall-curve
+    scores_list, gt_classes_list, statistics = [], [], {'tps': 0, 'tp_ious': [], 'fps': 0, 'fns': 0}
+    iou_thresholds = [0.5] # [0.75]
     
-def metrics(true_boxes, true_labels, pred_boxes, pred_labels, confidences):
+    # iterate over each image
+    for tboxes, tlabels, pboxes, plabels, confs in zip(true_boxes, true_labels, pred_boxes, pred_labels, confidences):    
+        new_scores, new_gt_classes, new_statistics = get_scores_and_classes(tboxes, pboxes, confs, iou_thresholds)
+        scores_list += new_scores
+        gt_classes_list += new_gt_classes
+        for key in statistics.keys():
+            statistics[key] += new_statistics[key]
+
+        assert len(scores_list) == len(gt_classes_list)
+    
+    if len(scores_list) > 0:
+        precision, recall, thresholds = precision_recall_curve(gt_classes_list, scores_list, fns=statistics['fns'])
+        average_precision = average_precision_score(gt_classes_list, scores_list) # -np.sum(np.diff(recall) * np.array(precision)[:-1]) 
+        area_under_curve = auc(recall, precision) # based on np.trapz
+    else:
+        average_precision = 0.
+
+    try:
+        recall_n = statistics['tps']/(statistics['tps']+statistics['fns'])
+        precision_n = statistics['tps']/(statistics['tps']+statistics['fps'])
+        f1_score = 2 * (precision_n * recall_n) / (precision_n + recall_n)
+    except ZeroDivisionError:
+        f1_score = 0.
+
+    if verbose:
+        if average_precision > 0.5:
+            print(f"[verbose call] average_precision={average_precision:.3e}, TPs: {statistics['tps']}, FPs: {statistics['tps']}, FNs: {statistics['fns']}")
+
+    # f = open("curve_values_FasterRCNN.txt", "w")
+    # for idx, list_item in enumerate([precision, recall, thresholds]):
+    #     f.write(f"__{idx}\n")
+    #     for item in list_item:
+    #         f.write(f"{item}\n")
+    # f.close()
+
+    if return_curve:
+        # plt.plot(recall, precision)
+        # plt.show()
+        """ from torch import Tensor
+        import matplotlib.pyplot as plt
+        from tqdm import tqdm
+        fig, ax = plt.subplots() if ax is None else (None, ax)
+
+        if isinstance(recall, Tensor) and isinstance(precision, Tensor) and recall.ndim == 1 and precision.ndim == 1:
+            # label = f"AUC={score.item():0.3f}" if score is not None else None
+            ax.plot(recall.detach().cpu(), precision.detach().cpu(), linestyle="-", linewidth=2, label=labels[0], color='blue')
+            if label_names is not None:
+                ax.set_xlabel(label_names[0])
+                ax.set_ylabel(label_names[1])
+            if label is not None or labels is not None:
+                ax.legend()
+        elif (isinstance(recall, list) and isinstance(precision, list)) or (
+            isinstance(recall, Tensor) and isinstance(precision, Tensor) and recall.ndim == 2 and precision.ndim == 2
+        ):
+            for i, (x_, y_) in tqdm(enumerate(zip(recall, precision)), total=len(recall)):
+                label = f"{legend_name}_{i}" if legend_name is not None else str(i)
+                # label += f" AUC={score[i].item():0.3f}" if score is not None else ""
+                ax.plot(x_, y_, label=label)
+                ax.legend()
+        else:
+            raise ValueError(
+                f"Unknown format for argument `x` and `y`. Expected either list or tensors but got {type(recall)} and {type(precision)}."
+            )
+        ax.grid(True)
+        ax.set_title(plot_name)
+        ax.set_ylim(0.0, 1.05) """
+        from torchmetrics.utilities.plot import plot_curve
+        fig, ax = plot_curve(
+            (torch.tensor(recall), torch.tensor(precision)), score=average_precision, ax=None, label_names=("Recall", "Precision"), name='Precision-Recall-Curve'
+        )
+        return average_precision, f1_score, statistics, (fig, ax)
+    
+    return average_precision, f1_score, statistics
+
+
+    
+def metrics_torch(true_boxes, true_labels, pred_boxes, pred_labels, confidences, calc_stats = True, return_curve = False):
     preds, targets = [], []
-    # should iterate over each image
-    for pboxes, plabels, confs in zip(pred_boxes, pred_labels, confidences):
+    # for precision-recall-curve
+    scores_list, gt_classes_list, statistics = [], [], {'tps': 0, 'tp_ious': [], 'fps': 0, 'fns': 0}
+    iou_thresholds = [0.5]
+    if return_curve: assert calc_stats, 'Statistics calculation must be turned on for PR curve!'
+
+    # iterate over each image
+    for tboxes, tlabels, pboxes, plabels, confs in zip(true_boxes, true_labels, pred_boxes, pred_labels, confidences):
+
         preds.append({
             "boxes": pboxes, # boxes / image
             "labels": plabels,
             "scores": confs
         })
-    for tboxes, tlabels in zip(true_boxes, true_labels):
         targets.append({
             "boxes": tboxes, # boxes / image
             "labels": tlabels
         })
 
+        if calc_stats:
+            new_scores, new_gt_classes, new_statistics = get_scores_and_classes(tboxes, pboxes, confs, iou_thresholds)
+            scores_list += new_scores
+            gt_classes_list += new_gt_classes
+            for key in statistics.keys():
+                statistics[key] += new_statistics[key]
+
+            assert len(scores_list) == len(gt_classes_list)
+
     mapInstance = MeanAveragePrecision()
     results = mapInstance.forward(preds, targets)
-    return results.map
+    m_ap = results['map'] # this is likely over all APs from .5 to .95 (and all classes) --> 0.43 is actually quite good then...
 
-
-
-
-
-
-class FasterRCNN_custom(FasterRCNN):
-    
-    def __init__(self, backbone, num_classes):
-        super().__init__(backbone, num_classes)
-
-        self.rpn.head = RPNHead_custom()
-        self.roi_heads.box_head = TwoMLPHead_custom(256 * 7 ** 2, 1024)
-        self.forward = self.forward
-        self.rpn.forward = self.forward_rpn
-        self.roi_heads.forward = self.forward_roi
-        self.metrics_mode = False
-        
-        self.simulator_embeddings = torch.nn.Embedding(3, 5*512)
-
-
-    def forward(self, images, numAgentIds, targets=None):
-        """
-        Args:
-            images (list[Tensor]): images to be processed
-            targets (list[Dict[str, Tensor]]): ground-truth boxes present in the image (optional)
-
-        Returns:
-            result (list[BoxList] or dict[Tensor]): the output from the model.
-                During training, it returns a dict[Tensor] which contains the losses.
-                During testing, it returns list[BoxList] contains additional fields
-                like `scores`, `labels` and `mask` (for Mask R-CNN models).
-
-        """
-        if targets is None:
-            raise ValueError("In training mode, targets should be passed")
-        for target in targets:
-            boxes = target["boxes"]
-            if isinstance(boxes, torch.Tensor):
-                if len(boxes.shape) != 2 or boxes.shape[-1] != 4:
-                    raise ValueError(f"Expected target boxes to be a tensor of shape [N, 4], got {boxes.shape}.")
-            else:
-                raise ValueError(f"Expected target boxes to be of type Tensor, got {type(boxes)}.")
-
-        original_image_sizes: List[Tuple[int, int]] = []
-        for img in images:
-            val = img.shape[-2:]
-            assert len(val) == 2
-            original_image_sizes.append((val[0], val[1]))
-
-        images, targets = self.transform(images, targets)
-
-        # embed simulator settings
-        ag_embeddings = self.simulator_embeddings(numAgentIds)
-
-        # Check for degenerate boxes
-        # TODO: Move this to a function
-        if targets is not None:
-            for target_idx, target in enumerate(targets):
-                boxes = target["boxes"]
-                degenerate_boxes = boxes[:, 2:] <= boxes[:, :2]
-                if degenerate_boxes.any():
-                    # print the first degenerate box
-                    bb_idx = torch.where(degenerate_boxes.any(dim=1))[0][0]
-                    degen_bb: List[float] = boxes[bb_idx].tolist()
-                    raise ValueError(
-                        "All bounding boxes should have positive height and width."
-                        f" Found invalid box {degen_bb} for target at index {target_idx}."
-                    )
-
-        features = self.backbone(images.tensors)
-        if isinstance(features, torch.Tensor):
-            features = OrderedDict([("0", features)])
-        proposals, proposal_losses = self.rpn(images, features, ag_embeddings, targets) # features: [0]=256, 144, 336 // [1]=256, 72, 168 // [2]= 256, 36, 84 // [3]=256, 18, 42 from [XXXX]=3,1360, 3200
-        detections, detector_losses = self.roi_heads(features, proposals, images.image_sizes, ag_embeddings, targets)
-        detections = self.transform.postprocess(detections, images.image_sizes, original_image_sizes)  # type: ignore[operator]
-
-        losses = {}
-        losses.update(detector_losses)
-        losses.update(proposal_losses)
-
-        if torch.jit.is_scripting():
-            if not self._has_warned:
-                warnings.warn("RCNN always returns a (Losses, Detections) tuple in scripting")
-                self._has_warned = True
-            return losses, detections
-        else:
-            # return self.eager_outputs(losses, detections)
-            # return detections if self.metrics_mode else losses
-            if self.training:
-                return losses
-            return losses, detections
-
-
-    def forward_roi(
-        self,
-        features, 
-        proposals,
-        image_shapes, 
-        ag_embeddings,
-        targets=None, 
-    ):
-        """
-        Args:
-            features (List[Tensor])
-            proposals (List[Tensor[N, 4]])
-            image_shapes (List[Tuple[H, W]])
-            targets (List[Dict])
-        """
-        # if targets is not None and not self.metrics_mode:
-        if targets is not None and self.roi_heads.training:
-            for t in targets:
-                # TODO: https://github.com/pytorch/pytorch/issues/26731
-                floating_point_types = (torch.float, torch.double, torch.half)
-                assert t["boxes"].dtype in floating_point_types, "target boxes must of float type"
-                assert t["labels"].dtype == torch.int64, "target labels must of int64 type"
-                if self.roi_heads.has_keypoint():
-                    assert t["keypoints"].dtype == torch.float32, "target keypoints must of float type"
-
-
-        # get the losses
-        proposals_w_gt, matched_idxs, labels, regression_targets = self.roi_heads.select_training_samples(proposals, targets)
-        box_features = self.roi_heads.box_roi_pool(features, proposals_w_gt, image_shapes)
-        box_features = self.roi_heads.box_head(box_features, ag_embeddings)
-        class_logits, box_regression = self.roi_heads.box_predictor(box_features)
-
-        result = []
-        losses = {}
-        loss_classifier, loss_box_reg = fastrcnn_loss(class_logits, box_regression, labels, regression_targets)
-        losses = {"loss_classifier": loss_classifier, "loss_box_reg": loss_box_reg}
-
-
-        # get the detections
-        if not self.training:
-            labels = None
-            regression_targets = None
-            matched_idxs = None
-            box_features = self.roi_heads.box_roi_pool(features, proposals, image_shapes)
-            box_features = self.roi_heads.box_head(box_features, ag_embeddings)
-            class_logits, box_regression = self.roi_heads.box_predictor(box_features)
-
-            boxes, scores, labels = self.roi_heads.postprocess_detections(class_logits, box_regression, proposals, image_shapes)
-            num_images = len(boxes)
-            for i in range(num_images):
-                result.append(
-                    {
-                        "boxes": boxes[i],
-                        "labels": labels[i],
-                        "scores": scores[i],
-                    }
-                )
-
-        if self.roi_heads.has_mask():
-            mask_proposals = [p["boxes"] for p in result]
-            # if self.roi_heads.training:
-            assert matched_idxs is not None
-            # during training, only focus on positive boxes
-            num_images = len(proposals)
-            mask_proposals = []
-            pos_matched_idxs = []
-            for img_id in range(num_images):
-                pos = torch.where(labels[img_id] > 0)[0]
-                mask_proposals.append(proposals[img_id][pos])
-                pos_matched_idxs.append(matched_idxs[img_id][pos])
-            # else:
-            #     pos_matched_idxs = None
-
-            if self.roi_heads.mask_roi_pool is not None:
-                mask_features = self.roi_heads.mask_roi_pool(features, mask_proposals, image_shapes)
-                mask_features = self.roi_heads.mask_head(mask_features)
-                mask_logits = self.roi_heads.mask_predictor(mask_features)
-            else:
-                raise Exception("Expected mask_roi_pool to be not None")
-
-            loss_mask = {}
-            # if self.roi_heads.training:
-            assert targets is not None
-            assert pos_matched_idxs is not None
-            assert mask_logits is not None
-
-            gt_masks = [t["masks"] for t in targets]
-            gt_labels = [t["labels"] for t in targets]
-            rcnn_loss_mask = maskrcnn_loss(mask_logits, mask_proposals, gt_masks, gt_labels, pos_matched_idxs)
-            loss_mask = {"loss_mask": rcnn_loss_mask}
-            # else:
-                # labels = [r["labels"] for r in result]
-                # masks_probs = maskrcnn_inference(mask_logits, labels)
-                # for mask_prob, r in zip(masks_probs, result):
-                #     r["masks"] = mask_prob
-
-            losses.update(loss_mask)
-
-        # keep none checks in if conditional so torchscript will conditionally
-        # compile each branch
-        if (
-            self.roi_heads.keypoint_roi_pool is not None
-            and self.roi_heads.keypoint_head is not None
-            and self.roi_heads.keypoint_predictor is not None
-        ):
-            keypoint_proposals = [p["boxes"] for p in result]
-            # if self.roi_heads.training:
-                # during training, only focus on positive boxes
-            num_images = len(proposals)
-            keypoint_proposals = []
-            pos_matched_idxs = []
-            assert matched_idxs is not None
-            for img_id in range(num_images):
-                pos = torch.where(labels[img_id] > 0)[0]
-                keypoint_proposals.append(proposals[img_id][pos])
-                pos_matched_idxs.append(matched_idxs[img_id][pos])
-            # else:
-            #     pos_matched_idxs = None
-
-            keypoint_features = self.roi_heads.keypoint_roi_pool(features, keypoint_proposals, image_shapes)
-            keypoint_features = self.roi_heads.keypoint_head(keypoint_features)
-            keypoint_logits = self.roi_heads.keypoint_predictor(keypoint_features)
-
-            loss_keypoint = {}
-            # if self.roi_heads.training:
-            assert targets is not None
-            assert pos_matched_idxs is not None
-
-            gt_keypoints = [t["keypoints"] for t in targets]
-            rcnn_loss_keypoint = keypointrcnn_loss(
-                keypoint_logits, keypoint_proposals, gt_keypoints, pos_matched_idxs
-            )
-            loss_keypoint = {"loss_keypoint": rcnn_loss_keypoint}
-            # else:
-            #     assert keypoint_logits is not None
-            #     assert keypoint_proposals is not None
-
-            #     keypoints_probs, kp_scores = keypointrcnn_inference(keypoint_logits, keypoint_proposals)
-            #     for keypoint_prob, kps, r in zip(keypoints_probs, kp_scores, result):
-            #         r["keypoints"] = keypoint_prob
-            #         r["keypoints_scores"] = kps
-
-            losses.update(loss_keypoint)
-
-        return result, losses
-    
-
-    def forward_rpn(
-        self,
-        images,
-        features,
-        ag_embeddings,
-        targets = None,
-    ):
-        """
-        Args:
-            images (ImageList): images for which we want to compute the predictions
-            features (Dict[str, Tensor]): features computed from the images that are
-                used for computing the predictions. Each tensor in the list
-                correspond to different feature levels
-            targets (List[Dict[str, Tensor]]): ground-truth boxes present in the image (optional).
-                If provided, each element in the dict should contain a field `boxes`,
-                with the locations of the ground-truth boxes.
-
-        Returns:
-            boxes (List[Tensor]): the predicted boxes from the RPN, one Tensor per
-                image.
-            losses (Dict[str, Tensor]): the losses for the model during training. During
-                testing, it is an empty dict.
-        """
-        # RPN uses all feature maps that are available
-        features = list(features.values())
-        # objectness, pred_bbox_deltas = self.rpn.head(features)
-        objectness, pred_bbox_deltas = self.rpn.head(features, ag_embeddings)
-        anchors = self.rpn.anchor_generator(images, features)
-
-        num_images = len(anchors)
-        num_anchors_per_level_shape_tensors = [o[0].shape for o in objectness]
-        num_anchors_per_level = [s[0] * s[1] * s[2] for s in num_anchors_per_level_shape_tensors]
-        objectness, pred_bbox_deltas = concat_box_prediction_layers(objectness, pred_bbox_deltas)
-        # apply pred_bbox_deltas to anchors to obtain the decoded proposals
-        # note that we detach the deltas because Faster R-CNN do not backprop through
-        # the proposals
-        proposals = self.rpn.box_coder.decode(pred_bbox_deltas.detach(), anchors)
-        proposals = proposals.view(num_images, -1, 4)
-        boxes, scores = self.rpn.filter_proposals(proposals, objectness, images.image_sizes, num_anchors_per_level)
-
-        losses = {}
-      
-        assert targets is not None
-        labels, matched_gt_boxes = self.rpn.assign_targets_to_anchors(anchors, targets)
-        regression_targets = self.rpn.box_coder.encode(matched_gt_boxes, anchors)
-        loss_objectness, loss_rpn_box_reg = self.rpn.compute_loss(
-            objectness, pred_bbox_deltas, labels, regression_targets
+    if return_curve:
+        import matplotlib.pyplot as plt
+        from torchmetrics.utilities.compute import _auc_compute_without_check
+        from torchmetrics.utilities.plot import plot_curve
+        bprc = BinaryPrecisionRecallCurve(thresholds=None)
+        curve_computed = [item for item in bprc(torch.tensor(scores_list), torch.tensor(gt_classes_list))]
+        score = _auc_compute_without_check(curve_computed[0], curve_computed[1], 1.0)
+        curve_computed[1], curve_computed[0] = curve_computed[0], curve_computed[1] # torchmetrics plots recall-precision vice versa
+        fig, ax = plot_curve(
+            curve_computed, score=score, ax=None, label_names=("Recall", "Precision"), name='Precision-Recall-Curve'
         )
-        losses = {
-            "loss_objectness": loss_objectness,
-            "loss_rpn_box_reg": loss_rpn_box_reg,
-        }
-        return boxes, losses
-    
+        # f = open("curve_values_FasterRCNN.txt", "w")
+        # for idx, list_item in enumerate(curve_computed):
+        #     f.write(f"__{idx}\n")
+        #     for item in list_item:
+        #         f.write(f"{item}\n")
+        # f.close()
+        return m_ap, statistics, fig
 
-class RPNHead_custom(torch.nn.Module):
+    return m_ap, statistics
+
+
+
+def calc_iou(box1, box2):
     """
-    Adds a simple RPN Head with classification and regression heads
+    Calculate the Intersection over Union (IoU) between two bounding boxes.
 
-    Args:
-        in_channels (int): number of channels of the input feature
-        num_anchors (int): number of anchors to be predicted
+    Parameters:
+    box1 (numpy array): [x1, y1, x2, y2] coordinates of the first bounding box.
+    box2 (numpy array): [x1, y1, x2, y2] coordinates of the second bounding box.
+
+    Returns:
+    float: IoU value.
     """
+    # Calculate the coordinates of the intersection rectangle
+    x1_intersection = max(box1[0], box2[0])
+    y1_intersection = max(box1[1], box2[1])
+    x2_intersection = min(box1[2], box2[2])
+    y2_intersection = min(box1[3], box2[3])
 
-    def __init__(self, in_channels: int = 256, num_anchors: int = 3) -> None:
-        super().__init__()
-        self.conv = torch.nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
-        self.cls_logits = torch.nn.Conv2d(in_channels, num_anchors, kernel_size=1, stride=1)
-        self.bbox_pred = torch.nn.Conv2d(in_channels, num_anchors * 4, kernel_size=1, stride=1)
+    # Calculate the area of intersection rectangle
+    intersection_area = max(0, x2_intersection - x1_intersection) * max(0, y2_intersection - y1_intersection)
 
-        for layer in self.children():
-            torch.nn.init.normal_(layer.weight, std=0.01)  # type: ignore[arg-type]
-            torch.nn.init.constant_(layer.bias, 0)  # type: ignore[arg-type]
+    # Calculate the area of each bounding box
+    box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
 
-        # customized
-        self.sim_fc = torch.nn.ModuleList([torch.nn.Linear(512, 21*9) for i in range(5)])
-        self.dim_red = torch.nn.ModuleList([torch.nn.Conv2d(256, 1, kernel_size=3, stride=1, padding=1) for i in range(5)])
-        self.dim_inc = torch.nn.ConvTranspose2d(in_channels=1, out_channels=256, kernel_size=3, stride=1, padding=1)
-        self.size_up = torch.nn.ConvTranspose2d(in_channels=256, out_channels=256, kernel_size=1, stride=2, padding=0, output_padding=1)
+    # Calculate the Union area by adding the areas of both boxes and subtracting the intersection area
+    union_area = box1_area + box2_area - intersection_area
+
+    # Calculate IoU
+    iou_value = intersection_area / union_area
+
+    return iou_value
 
 
-    def forward(self, x: List[Tensor], ag_embeddings) -> Tuple[List[Tensor], List[Tensor]]:
-        ag_embeddings = torch.split(ag_embeddings, 512, dim=-1)
-
-        logits = []
-        bbox_reg = []
-        for i_t, feature in enumerate(x):
-            # new:
-            emb = self.sim_fc[i_t](ag_embeddings[i_t]).view(-1, 1, 9, 21)
-            feat_red = self.dim_red[i_t](feature)
-            assert feat_red.size()[2] // 9 == feat_red.size()[3] // 21
-            size_factor = feat_red.size()[2] // 9
-            feat_red = torch.nn.MaxPool2d(size_factor)(feat_red)
-            feat_out = self.dim_inc(emb + feat_red)
-            for _r in range(len(x) - i_t - 1):
-                feat_out = self.size_up(feat_out)
-            feat_out = F.relu(feat_out)
-
-            # old:
-            t = F.relu(self.conv(feature))
-            t = t + feat_out # also new
-            logits.append(self.cls_logits(t))
-            bbox_reg.append(self.bbox_pred(t))
-        return logits, bbox_reg
+def precision_recall_curve(
+    y_true, probas_pred, fns=0, *, pos_label=1, sample_weight=None, drop_intermediate=False
+):
+    """
+    source implementation from sklearn
+    """
+    classes = np.unique(y_true)
+    assert (np.array_equal(classes, [0, 1]) or np.array_equal(classes, [0]) or np.array_equal(classes, [1])), f'Failure with given classes: {classes.tolist()}'
     
+    from sklearn.metrics._ranking import _binary_clf_curve
+    fps, tps, thresholds = _binary_clf_curve(
+        y_true, probas_pred, pos_label=pos_label, sample_weight=sample_weight
+    )
 
-class TwoMLPHead_custom(torch.nn.Module):
+    if drop_intermediate and len(fps) > 2:
+        # Drop thresholds corresponding to points where true positives (tps)
+        # do not change from the previous or subsequent point. This will keep
+        # only the first and last point for each tps value. All points
+        # with the same tps value have the same recall and thus x coordinate.
+        # They appear as a vertical line on the plot.
+        optimal_idxs = np.where(
+            np.concatenate(
+                [[True], np.logical_or(np.diff(tps[:-1]), np.diff(tps[1:])), [True]]
+            )
+        )[0]
+        fps = fps[optimal_idxs]
+        tps = tps[optimal_idxs]
+        thresholds = thresholds[optimal_idxs]
 
-    def __init__(self, in_channels, representation_size):
-        super().__init__()
+    ps = tps + fps
+    # Initialize the result array with zeros to make sure that precision[ps == 0]
+    # does not contain uninitialized values.
+    precision = np.zeros_like(tps)
+    np.divide(tps, ps, out=precision, where=(ps != 0))
 
-        self.fc6 = torch.nn.Linear(in_channels, representation_size)
-        self.fc7 = torch.nn.Linear(representation_size, representation_size)
+    # When no positive label in y_true, recall is set to 1 for all thresholds
+    # tps[-1] == 0 <=> y_true == all negative labels
+    if tps[-1] == 0:
+        warnings.warn(
+            "No positive class found in y_true, "
+            "recall is set to one for all thresholds."
+        )
+        recall = np.ones_like(tps)
+    else:
+        recall = tps / (tps[-1] + fns)
 
-    def forward(self, x, ag_embeddings):
-        ag_embeddings = torch.split(ag_embeddings, 512, dim=-1)
-        x = x.flatten(start_dim=1)
+    # reverse the outputs so recall is decreasing
+    sl = slice(None, None, -1)
+    return np.hstack((precision[sl], 1)), np.hstack((recall[sl], 0)), thresholds[sl]
 
-        x = F.relu(self.fc6(x))
-        x = F.relu(self.fc7(x))
 
-        return x
+def get_scores_and_classes(tboxes, pboxes, confs, iou_thresholds):
+
+    # maskUtils.iou(dt,gt), dt/gt = List[List[4xfloat]]
+    # import pycocotools.mask as maskUtils
+
+    new_scores, new_gt_classes = [], []
+    tps, fps, fns = 0, 0, 0
+    ious = np.zeros((len(pboxes), len(tboxes)), dtype=np.float32)
+    scores = np.zeros((len(pboxes), len(tboxes)), dtype=np.float32)
+
+    if tboxes.shape[0]==0:
+        app_list = confs.tolist()
+        new_scores += app_list
+        new_gt_classes += [0]*len(app_list)
+        assert len(new_scores) == len(new_gt_classes)
+        return new_scores, new_gt_classes, {'tps': 0, 'tp_ious': [], 'fps': len(app_list), 'fns': 0}
+    if pboxes.shape[0]==0:
+        # new_gt_classes += [1]*tboxes.shape[0]
+        # new_scores += [0.0]*tboxes.shape[0]
+        assert len(new_scores) == len(new_gt_classes)
+        return new_scores, new_gt_classes, {'tps': 0, 'tp_ious': [], 'fps': 0, 'fns': tboxes.shape[0]}
+    
+    for ip, p_box in enumerate(pboxes):
+        for it, gt_box in enumerate(tboxes):
+            iou_ = calc_iou(p_box, gt_box)
+            # iou_c = maskUtils.iou([p_box.numpy().tolist()], [gt_box.numpy().tolist()])
+            if iou_ > 0.:
+                assert confs[ip] > 0.
+                ious[ip, it] = iou_
+                scores[ip, it] = confs[ip]
+    
+    # for testing
+    # ious = np.hstack((np.zeros((len(ious), 3)), ious))
+    # scores = np.hstack((2.5*np.ones((len(ious), 3)), scores))
+    
+    sum_over_ious = np.sum(ious, axis=0)
+    no_match_gts = np.argwhere(sum_over_ious==0)
+    if no_match_gts.shape[0] > 0:
+        hi = 43
+    neg_fn_mask = (sum_over_ious != 0)
+    fns = no_match_gts.shape[0]
+
+    # append the false negatives
+    # new_scores += [0.0]*no_match_gts.shape[0]
+    # new_gt_classes += [1]*no_match_gts.shape[0]
+        
+    # get the coordinates of the biggest IOUs for their corresponding scores
+    # pbox_indices = np.argmax(ious, axis=0)
+    # pbox_indices = np.column_stack((pbox_indices, np.arange(len(pbox_indices))))
+    # pbox_indices = pbox_indices[neg_fn_mask]
+    max_ious = np.max(ious, axis=0)
+
+    valid_iou_coordinates = np.argwhere((max_ious == ious) & (max_ious > iou_thresholds[0]))
+    
+    if max_ious.shape[0] > valid_iou_coordinates.shape[0]:
+        lll = 3
+    
+    scores_tps = scores[valid_iou_coordinates[:, 0], valid_iou_coordinates[:, 1]]
+    ious_tps = ious[valid_iou_coordinates[:, 0], valid_iou_coordinates[:, 1]].tolist()
+    # assign zeros after extraction
+    scores[valid_iou_coordinates[:, 0], valid_iou_coordinates[:, 1]] = 0
+
+    new_scores += [float(val) for val in scores_tps] # true positives
+    new_gt_classes += [1]*scores_tps.shape[0]
+    tps = scores_tps.shape[0]
+
+    remaining_score_indizes = np.nonzero(scores)
+    remaining_scores = scores[remaining_score_indizes].tolist()
+
+    new_scores += remaining_scores
+    new_gt_classes += [0]*len(remaining_scores)
+    fps = len(remaining_scores)
+
+    return new_scores, new_gt_classes, {'tps': tps, 'tp_ious': ious_tps, 'fps': fps, 'fns': fns}
