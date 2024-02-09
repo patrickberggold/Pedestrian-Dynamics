@@ -6,18 +6,17 @@ import pytorch_lightning as pl
 from Modules.goal.models.goal_sar import Goal_SAR
 from Modules.coca.coca4traj import CoCa4Traj
 from sys import path 
-from Modules.coca.simple_goal import SimpleGoal
-from Modules.coca.advanced_goal import AdvancedGoal
-from Modules.coca.gan_goal import Generator
+from Modules.coca.vae_goal import CoCaGoal
+from Modules.coca.gan_goal import Discriminator, Generator
 import numpy as np
 from Modules.transformer.transformer import Transformer
 import torch
 import os
 # from decimal import Decimal
 
-class Seq2SeqModule(pl.LightningModule):
+class Seq2SeqModule_GAN(pl.LightningModule):
     def __init__(self, config: dict, train_config: dict):
-        super(Seq2SeqModule, self).__init__()
+        super(Seq2SeqModule_GAN, self).__init__()
         
         self.config = config
         self.mode = config['mode']
@@ -35,68 +34,30 @@ class Seq2SeqModule(pl.LightningModule):
         self.ff_mult = train_config['ff_mult']
         self.init = train_config['init']
         ###
+        coords_normed = train_config['coords_normed']
+        assert coords_normed == False
         separate_obs_agent_batches = train_config['separate_obs_agent_batches']
-        predict_additive = train_config['predict_additive']
+        separate_fut_agent_batches = train_config['separate_fut_agent_batches']
+        fuse_option = train_config['fuse_option']
 
         # decoder_mode: 0=teacher forcing, 1=running free, 2=scheduled sampling
         self.decoder_mode_training = 0
         self.decoder_mode_validation = 1 if self.mode == 'TRAJ_PRED' else 0
 
         assert self.lr_scheduler in [CosineAnnealingLR.__name__, StepLR.__name__, ExponentialLR.__name__, ReduceLROnPlateau.__name__], 'Unknown LR Scheduler!'
-        assert self.arch in ['goal', 'tf', 'coca', 'coca_goal', 'simple_goal', 'gan_goal', 'adv_goal'], 'Unknown architecture!'
-  
-        if self.arch == 'goal':
-            self.model = Goal_SAR(config=config, traj_quantity=self.traj_quantity)
-        elif self.arch == 'tf':
-            self.model = Transformer(enc_inp_size=2, dec_inp_size=3, dec_out_size=3, dropout=0.3, traj_quantity=self.traj_quantity)
-        elif self.arch == 'simple_goal':
-            self.model = SimpleGoal(
-                config = config,
-                dim = self.dim,
-                num_enc_layers = self.num_enc_layers,
-                num_dec_layers = self.num_dec_layers,
-                ff_mult = self.ff_mult,
-                init = self.init,
-                ###
-                pretrained_vision=True, predict_additive=predict_additive, separate_obs_agent_batches=separate_obs_agent_batches
-            )
-            if self.model.pretrained_vision and hasattr(self.model, 'img_encoder'):
-                self.model._modules['img_encoder'].requires_grad_(False)
-        elif self.arch == 'adv_goal':
-            self.model = AdvancedGoal(
-                config = config,
-                dim = self.dim,
-                num_enc_layers = self.num_enc_layers,
-                num_dec_layers = self.num_dec_layers,
-                ff_mult = self.ff_mult,
-                init = self.init,
-                fuse_option = train_config['fuse_option'],
-                ###
-                pretrained_vision=True, predict_additive=predict_additive, separate_obs_agent_batches=separate_obs_agent_batches,
-            )
-            if self.model.pretrained_vision and hasattr(self.model, 'img_encoder'):
-                self.model._modules['img_encoder'].requires_grad_(False)
-        elif self.arch == 'gan_goal':
-            self.model = Generator(
-                config = config,
-                dim = self.dim,
-                num_enc_layers = self.num_enc_layers,
-                num_dec_layers = self.num_dec_layers,
-                ff_mult = self.ff_mult,
-                init = self.init,
-                ###""" coords_normed = coords_normed, separate_obs_agent_batches = separate_obs_agent_batches, separate_fut_agent_batches = separate_fut_agent_batches, fuse_option = fuse_option """
-                )
-        elif self.arch == 'coca':
-            from Modules.coca.coca4traj import CoCa4Traj
-            # from Modules.coca.coca import CoCa
-            self.model = CoCa4Traj(
-                config=config,
-                dim = 512,
-                sequence_enc_blocks = 1,  # DEFAULT 6
-                multimodal_blocks = 1,  # DEFAULT 6
-                heads = 8,
-                ff_mult = 1, # DEFAULT 4
-            )
+        assert self.arch in ['goal', 'tf', 'coca', 'coca_goal', 'gan_goal'], 'Unknown architecture!'
+
+        self.generator = Generator(
+            config = config,
+            dim = self.dim,
+            num_enc_layers = self.num_enc_layers,
+            num_dec_layers = self.num_dec_layers,
+            ff_mult = self.ff_mult,
+            init = self.init,
+            ###
+            coords_normed = coords_normed, separate_obs_agent_batches = separate_obs_agent_batches, separate_fut_agent_batches = separate_fut_agent_batches, fuse_option = fuse_option)
+        
+        self.discriminator = Discriminator(config=config)
 
         self.save_results = config['save_results']
         self.txt_path = config['store_path'] if self.save_results and 'store_path' in config else None
@@ -110,46 +71,76 @@ class Seq2SeqModule(pl.LightningModule):
         self.val_metrics = {}
         self.val_metrics_per_epoch = {}
 
+        self.automatic_optimization = False
+
     def forward(self, x):
+        raise NotImplementedError
         return self.model(x)
 
-    def training_step(self, batch, batch_idx: int):
-        # TODO maybe implement scheduler change once backbone is unfreezed
+    
+    def training_step(self, batch):
 
-        prediction = self.model.forward(batch, decoder_mode=self.decoder_mode_training) # decoder_mode: 0=teacher forcing, 1=running free, 2=scheduled sampling
+        optimizer_g, optimizer_d = self.optimizers()
 
-        train_loss, losses_it, metrics_it = self.model.compute_loss(prediction, batch, stage='train')
-        # for a sequence: use self-attn(goal pred)[-1] as coord embed?
-        # implement dst arrival, and corresponding last coord loss
-        # find out how many future steps are still stable by providing goal as GT, then see which step number remains stable
+        # train generator
+        # self.toggle_optimizer(optimizer_g)
+        pred_traj_fake, pred_traj_fake_rel = self.generator(batch)
+        loss_G = torch.FloatTensor([0])
         
-        # AgentFormer: context_enc: kv_pairs and MLP(.mean()) --> mu, logvar --> q_z_dist_dlow = Normal(mu, logvar) with kl function
+        optimizer_g.zero_grad()
+        self.manual_backward(loss_G)
+        optimizer_g.step()
+
+        # scores loss
+        scores = self.discriminator(batch, pred_traj_fake, pred_traj_fake_rel)
+        loss_D = torch.FloatTensor([0])
+
+        optimizer_d.zero_grad()
+        self.manual_backward(loss_D)
+        optimizer_d.step()
+
+        # self.log("d_loss", d_loss, prog_bar=True)
+        # self.untoggle_optimizer(optimizer_d)
+
+        self.log_dict({"g_loss": loss_G, "d_loss": loss_D}, prog_bar=True)
+
+        sch1, sch2 = self.lr_schedulers()
+        sch1.step()
+        sch2.step()
 
         # log losses and metrics internally
         # self.internal_log({'train_loss': losses_it.item()}, metrics_it, stage='train')
-        self.internal_log(losses_it, metrics_it, stage='train')
+        # self.internal_log(losses_it, metrics_it, stage='train')
         
-        self.log('loss', train_loss, on_step=False, on_epoch=True, logger=False)
-        return {'loss' : train_loss}
+        # self.log('loss', train_loss, on_step=False, on_epoch=True, logger=False)
+        # return {'loss' : train_loss}
 
     def validation_step(self, batch, batch_idx: int) -> None:
+        self.generator.eval()
+        self.discriminator.eval()
 
-        prediction = self.model.forward(batch, decoder_mode=self.decoder_mode_validation) # decoder_mode: 0=teacher forcing, 1=running free, 2=scheduled sampling
+        pred_traj_fake, pred_traj_fake_rel = self.generator(batch)
+        loss_G = torch.FloatTensor([0])
 
-        if self.txt_path is not None: # save images only if results are generally saved
-            folder_id = self.current_epoch if self.trainer.state.stage != 'sanity_check' else 'sanityCheck'
-            save_path = os.sep.join([self.trainer.checkpoint_callbacks[0].dirpath, f'images_epoch_{folder_id}']) if self.current_epoch % 1 == 0 else None
-            if save_path is not None and not os.path.exists(save_path): os.mkdir(save_path)
-        else:
-            save_path = None
-        val_loss, losses_it, metrics_it = self.model.compute_loss(prediction, batch, stage='val', save_path=save_path)
+        scores = self.discriminator(pred_traj_fake, pred_traj_fake_rel)
+        loss_D = torch.FloatTensor([0])
+
+        self.log_dict({"g_loss": loss_G, "d_loss": loss_D}, prog_bar=True)
+
+        # if self.txt_path is not None: # save images only if results are generally saved
+        #     folder_id = self.current_epoch if self.trainer.state.stage != 'sanity_check' else 'sanityCheck'
+        #     save_path = os.sep.join([self.trainer.checkpoint_callbacks[0].dirpath, f'images_epoch_{folder_id}']) if self.current_epoch % 1 == 0 else None
+        #     if save_path is not None and not os.path.exists(save_path): os.mkdir(save_path)
+        # else:
+        #     save_path = None
+        # val_loss, losses_it, metrics_it = self.model.compute_loss(prediction, batch, stage='val', save_path=save_path)
 
         # log losses and metrics internally
         # self.internal_log({'val_loss': losses_it}, metrics_it, stage='val')
-        self.internal_log(losses_it, metrics_it, stage='val')
+        # self.internal_log(losses_it, metrics_it, stage='val')
         
-        self.log('val_loss', val_loss, on_step=False, on_epoch=True, logger=False)
-        return {'val_loss' : val_loss}
+        # self.log('val_loss', val_loss, on_step=False, on_epoch=True, logger=False)
+        # return {'val_loss' : val_loss}
 
 
     def internal_log(self, losses_it, metrics_it, stage):
@@ -174,8 +165,8 @@ class Seq2SeqModule(pl.LightningModule):
 
     def configure_optimizers(self):
         if self.arch == 'gan_goal':
-            opt_g = Adam(self.model.generator.parameters(), lr = self.learning_rate)
-            opt_d = Adam(self.model.discriminator.parameters(), lr = self.learning_rate)
+            opt_g = Adam(self.generator.parameters(), lr = self.learning_rate)
+            opt_d = Adam(self.discriminator.parameters(), lr = self.learning_rate)
             sch_g = ReduceLROnPlateau(opt_g, factor=self.lr_sch_gamma, patience=self.lr_sch_patience4redOnPlat, min_lr=1e-7)
             sch_d = ReduceLROnPlateau(opt_d, factor=self.lr_sch_gamma, patience=self.lr_sch_patience4redOnPlat, min_lr=1e-7)
             return [opt_g, opt_d], [sch_g, sch_d]
@@ -313,7 +304,7 @@ class Seq2SeqModule(pl.LightningModule):
         # return super().on_fit_start()
         print(f"\nFREEZE STRATEGY INITIALIZED IN EPOCH {self.current_epoch}\n")
         module_list = list(self.model._modules.keys())
-        if self.model.pretrained_vision and hasattr(self.model, 'img_encoder'):
+        if self.model.pretrained_vision:
             for p in self.model._modules['img_encoder'].parameters():
                 assert p.requires_grad == False, 'Vision encoder should be frozen!'
         # for key, module in self.model._modules.items():

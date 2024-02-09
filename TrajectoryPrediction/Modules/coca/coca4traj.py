@@ -322,16 +322,37 @@ class CoCa4Traj(nn.Module):
         self.normalize_dataset = config['normalize_dataset'] 
         self.img_arch = config['img_arch']
         self.mode = config['mode']
-        self.seq_length = config['seq_length']
         self.num_obs_steps = config['num_obs_steps']
+        self.seq_length = config['pred_length']+self.num_obs_steps
 
         self.ds_mean = 320
         self.ds_std = 75
 
+        coord_dims = 2
+
         # token embeddings
         self.pad_id = 0
         self.check_for_fill = torch.isinf
-        self.tokens = ['[PAD]', '[BOS]', '[EOS]', '[MASK]', '[TRAJ]', '[UNK]'] if config['data_format'] == 'tokenized' else None
+
+        # TODO try different output heads --> implement them...
+        if config['data_format'] in ['partial_tokenized_random', 'partial_tokenized_by_frame']:
+            self.tokens = ['[PAD]', '[BOS]', '[EOS]', '[MASK]', '[TRAJ]', '[UNK]']
+            dict_size = len(self.tokens) if self.tokens is not None else 0
+            self.to_logits = ToLogitsNet(dim, coord_dims, dict_size)
+        elif config['data_format'] == 'full_tokenized_by_frame':
+            self.tokens = ['[PAD]', '[BOS]', '[EOS]', '[MASK]', '[TRAJ]', '[UNK]'] + [i for i in range(50)] + [i for i in range(50)]
+            dict_size = len(self.tokens) if self.tokens is not None else 0
+            self.to_logits = nn.Sequential(
+                LayerNorm(dim),
+                nn.Linear(dim, dict_size, bias=False)
+            )
+        else:
+            self.tokens = None
+            self.to_logits = nn.Sequential(
+                LayerNorm(dim),
+                nn.Linear(dim, coord_dims, bias=False)
+            )
+
         if self.tokens is None:
             assert self.mode != 'MTM', 'for mode MTM tokens must not be None!'
 
@@ -358,17 +379,8 @@ class CoCa4Traj(nn.Module):
             self.text_cls_token = nn.Parameter(torch.randn(dim))
             self.text_cls_norm = LayerNorm(dim)
 
-        dict_size = len(self.tokens) if self.tokens is not None else 0
-        coord_dims = 2
+        self.token_emb = TrajectoryEmbedding(coord_dims, self.tokens, dim, data_format = config['data_format'])
 
-        self.token_emb = TrajectoryEmbedding(coord_dims, self.tokens, dim)
-        if self.tokens is not None:
-            self.to_logits = nn.Sequential(
-                LayerNorm(dim),
-                nn.Linear(dim, coord_dims+dict_size, bias=False)
-            )
-
-            # TODO try different output heads --> implement them...
             # self.to_logits = nn.Sequential(
             #     LayerNorm(dim),
             #     nn.ModuleList([
@@ -378,12 +390,6 @@ class CoCa4Traj(nn.Module):
             # )
 
             # self.to_logits[-1][0].weight = self.token_emb.embed_token.weight
-
-        else:
-            self.to_logits = nn.Sequential(
-                LayerNorm(dim),
-                nn.Linear(dim, coord_dims, bias=False)
-            )
 
         # they used embedding weight tied projection out to logits, not common, but works
         # self.to_logits[-1].weight = self.token_emb.weight
@@ -460,16 +466,16 @@ class CoCa4Traj(nn.Module):
 
     
     def embed_text(self, obs, tokens):
-        batch, device = obs.shape[0], obs.device
+        # batch, device = obs.shape[0], obs.device
 
-        seq = obs.shape[1]
+        # seq = obs.shape[1]
 
         text_tokens = self.token_emb(obs, tokens) # [4, 511] --> [4, 511, 512]
 
         if self.use_contrastive_loss:
 
             # append text cls tokens
-
+            batch = obs.shape[0]
             text_cls_tokens = repeat(self.text_cls_token, 'd -> b 1 d', b=batch)
             text_tokens = torch.cat((text_tokens, text_cls_tokens), dim=-2)
 
@@ -501,7 +507,7 @@ class CoCa4Traj(nn.Module):
 
 
     def embed_pred(self, labels, tokens):
-        batch, device = labels.shape[0], labels.device
+        # batch, device = labels.shape[0], labels.device
 
         label_tokens = self.token_emb(labels, tokens)
          # go through unimodal layers
@@ -541,15 +547,15 @@ class CoCa4Traj(nn.Module):
 
 
     def set_mapping_traj_pred(self, abs_coordinates, tokens, decoder_mode):
-        obs_coords = abs_coordinates[:, :self.num_obs_steps]
+        obs_coords = abs_coordinates[:, :self.num_obs_steps] if abs_coordinates is not None else None
         obs_tokens = tokens[:, :self.num_obs_steps] if tokens is not None else None
         # train = True
         if decoder_mode==0:
             # teacher forcing
-            label_coords = abs_coordinates[:, self.num_obs_steps:]
+            label_coords = abs_coordinates[:, self.num_obs_steps:] if abs_coordinates is not None else None
             label_tokens = tokens[:, self.num_obs_steps:] if tokens is not None else None
         else:
-            label_coords = obs_coords[:, -1].unsqueeze(1)
+            label_coords = obs_coords[:, -1].unsqueeze(1) if abs_coordinates is not None else None
             label_tokens = obs_tokens[:, -1].unsqueeze(1) if tokens is not None else None
             # obs = abs_coordinates[:, :7] and label = abs_coordinates[:, 8] ?
         return obs_coords, obs_tokens, label_coords, label_tokens
@@ -588,7 +594,7 @@ class CoCa4Traj(nn.Module):
         else:
             dec_input = label_coords
             dec_tokens = label_tokens
-            predicted_output = [] if dec_tokens is not None else None
+            token_logits = [] if dec_tokens is not None and label_coords is not None else None
             # TODO what is the first token now for running free mode?
             # TODO check if running free mode implemented correctly for tokenized data_loader
             for i in range(self.seq_length - self.num_obs_steps):
@@ -603,20 +609,22 @@ class CoCa4Traj(nn.Module):
                 dec_output = self.to_logits(label_tokens)
 
                 # if tokenized, then apply running free mode for tokens as well
-                if dec_tokens is not None: 
-                    if len(predicted_output)==0: 
-                        predicted_output.append(dec_output[:,-1,2:].unsqueeze(1))
-                    elif len(predicted_output)==1:
-                        predicted_output = torch.cat((predicted_output[0], dec_output[:,-1,2:].unsqueeze(1)), dim=1)
-                    else:
-                        predicted_output = torch.cat((predicted_output, dec_output[:,-1,2:].unsqueeze(1)), dim=1)
-                    dec_output_tokens = torch.argmax(dec_output[:,:,2:], dim=-1) # argmax is predicted class by cross-entropy
-                    dec_tokens = torch.cat((dec_tokens, dec_output_tokens[:,-1].unsqueeze(1)), dim=1)
-                    dec_output = dec_output[:,:,:2]
-                dec_input = torch.cat((dec_input, dec_output[:,-1].unsqueeze(1)), dim=1)
-
-            logits = dec_input[:, 1:]
-            if dec_tokens is not None: logits = torch.cat((logits, predicted_output), dim=-1)
+                if label_coords is not None:
+                    if dec_tokens is not None: 
+                        if len(token_logits)==0: 
+                            token_logits = dec_output[:,-1,2:].unsqueeze(1)
+                        else:
+                            token_logits = torch.cat((token_logits, dec_output[:,-1,2:].unsqueeze(1)), dim=1)
+                        dec_output_tokens = torch.argmax(dec_output[:,:,2:], dim=-1) # argmax is predicted class by cross-entropy
+                        dec_tokens = torch.cat((dec_tokens, dec_output_tokens[:,-1].unsqueeze(1)), dim=1)
+                        dec_output = dec_output[:,:,:2]
+                    dec_input = torch.cat((dec_input, dec_output[:,-1].unsqueeze(1)), dim=1)
+                else:
+                    if dec_tokens is not None:
+                        dec_output_tokens = torch.argmax(dec_output, dim=-1) # argmax is predicted class by cross-entropy
+                        dec_tokens = torch.cat((dec_tokens, dec_output_tokens[:,-1].unsqueeze(1)), dim=1)
+            logits = dec_input[:, 1:] if dec_input is not None else dec_tokens[:, 1:]
+            if token_logits is not None: logits = torch.cat((logits, token_logits), dim=-1)
         
         return logits
 
@@ -636,14 +644,19 @@ class CoCa4Traj(nn.Module):
         batch,
         decoder_mode=0,
     ):
-        images = batch[0]
-        abs_coordinates = batch[1].squeeze(0)
-        tokens = batch[2].squeeze(0) if len(batch)>=3 else None
-        mtm_mask = batch[3].squeeze(0) if len(batch)>=4 else None
+        images = batch['images']
+        abs_coordinates = batch['coords'].squeeze(0) if 'coords' in batch else None
+        tokens = batch['tokens'] if 'tokens' in batch else None
+        mtm_mask = batch['mtm_mask'].squeeze(0) if 'mtm_mask' in batch else None
+
+        if isinstance(tokens, torch.Tensor):
+            tokens = tokens.squeeze(0)
+        elif isinstance(tokens, tuple):
+            tokens = tokens[0].squeeze(0)
 
         obs_coords, obs_tokens, label_coords, label_tokens = self.set_mapping(abs_coordinates, tokens, decoder_mode, mtm_mask)
 
-        batch, device = obs_coords.shape[0], obs_coords.device
+        # batch, device = obs_coords.shape[0], obs_coords.device
         # text de-/encoder
         obs_embeds, obs_tokens = self.embed_text(obs_coords, obs_tokens)
         # image encoder
@@ -660,15 +673,21 @@ class CoCa4Traj(nn.Module):
 
     def compute_loss_with_tokens(self, label_coords, label_tokens, prediction_coords, prediction_tokens):
         # TODO turn off assertions after one batch
-        is_traj_mask = label_tokens.eq(4).unsqueeze(-1).repeat(1, 1, 2)
+        is_traj_mask = label_tokens.eq(self.tokenize('[TRAJ]')).unsqueeze(-1).repeat(1, 1, 2)
         assert torch.equal(self.check_for_fill(label_coords)[:,:,0], self.check_for_fill(label_coords)[:,:,1]), 'obs masks on x- and y-direction need to be equal!'
-        assert torch.equal(~self.check_for_fill(label_coords)[:,:,0], label_tokens.eq(4)), '4-mask in tokens needs to be equal to non-inf mask in traj!'
+        assert torch.equal(~self.check_for_fill(label_coords)[:,:,0], label_tokens.eq(self.tokenize('[TRAJ]'))), '4-mask in tokens needs to be equal to non-inf mask in traj!'
 
         label_coords = label_coords.masked_fill(~is_traj_mask, 0)
         caption_loss_traj = torch.sum(((prediction_coords-label_coords)*is_traj_mask)**2.0)  / torch.sum(is_traj_mask)
         caption_loss_tokens = F.cross_entropy(prediction_tokens.permute(0, 2, 1), label_tokens.long())
 
         return caption_loss_traj + self.ce_factor + caption_loss_tokens, is_traj_mask
+    
+
+    # def compute_loss_without_coords(self, label_tokens, prediction_tokens):
+    #     is_traj_mask = torch.ones_like(prediction_tokens, device=prediction_tokens.device, dtype=bool)
+    #     caption_loss_traj = F.cross_entropy(prediction_tokens.permute(0, 2, 1), label_tokens.long())
+    #     return caption_loss_traj, is_traj_mask
 
 
     def compute_loss_without_tokens(self, label_coords, prediction_coords):
@@ -679,10 +698,11 @@ class CoCa4Traj(nn.Module):
 
     def compute_loss(self, prediction, batch, stage):
 
-        abs_coords = batch[1].squeeze(0)
-        abs_tokens = batch[2].squeeze(0) if len(batch)>=3 else None
-        mtm_mask = batch[3].squeeze(0) if len(batch)>=4 else None
-        _, _, label_coords, label_tokens = self.set_mapping(abs_coords, abs_tokens, 0, mtm_mask)
+        abs_coordinates = batch['coords'].squeeze(0) if 'coords' in batch else None
+        tokens = batch['tokens'].squeeze(0) if 'tokens' in batch else None
+        mtm_mask = batch['mtm_mask'].squeeze(0) if 'mtm_mask' in batch else None
+    
+        _, _, label_coords, label_tokens = self.set_mapping(abs_coordinates, tokens, 0, mtm_mask)
 
         if self.use_contrastive_loss:
             logits, obs_embeds, image_embeds = prediction
@@ -711,11 +731,12 @@ class CoCa4Traj(nn.Module):
             return total_loss, {'MSE_total': total_loss.item(), 'MSE_caption': caption_loss.item()}, None
 
         else:
-            if label_tokens is not None:
+            if label_tokens is not None and label_coords is not None:
                 prediction_coords = prediction[0][:,:,:2]
                 prediction_tokens = prediction[0][:,:,2:]
                 caption_loss, is_traj_mask = self.compute_loss_with_tokens(label_coords, label_tokens, prediction_coords, prediction_tokens)  
-
+            # elif label_tokens is not None and label_coords is None:
+            #     caption_loss, is_traj_mask = self.compute_loss_without_coords(label_tokens, prediction_tokens)
             else:
                 prediction_coords = prediction[0].squeeze()
                 caption_loss, is_traj_mask = self.compute_loss_without_tokens(label_coords, prediction_coords)
@@ -726,39 +747,91 @@ class CoCa4Traj(nn.Module):
                 prediction_m = prediction_m * self.ds_std + self.ds_mean
                 labels_m = labels_m * self.ds_std + self.ds_mean
 
-            ade_loss = torch.sum((torch.abs(prediction_m - labels_m).masked_fill(~is_traj_mask, 0)))  / torch.sum(is_traj_mask)
-            metrics = {'ADE_true_caption:': ade_loss.item()}
-            
-            if label_tokens is not None:
-                prediction_tokens = torch.argmax(prediction_tokens, dim=-1)
-                token_accuracy = (label_tokens == prediction_tokens).sum() / torch.numel(label_tokens)
-                metrics['Token_accuracy'] = token_accuracy.item()
+            with torch.no_grad():
+                ade_loss = torch.sum((torch.abs(prediction_m - labels_m).masked_fill(~is_traj_mask, 0)))  / torch.sum(is_traj_mask)
+                metrics = {'ADE_true_caption:': ade_loss.item()}
+                
+                if label_tokens is not None:
+                    prediction_tokens = torch.argmax(prediction_tokens, dim=-1)
+                    token_accuracy = (label_tokens == prediction_tokens).sum() / torch.numel(label_tokens)
+                    metrics['Token_accuracy'] = token_accuracy.item()
 
             return caption_loss, {'MSE_caption': caption_loss.item()}, metrics
     
 
+class ToLogitsNet(nn.Module):
+    def __init__(self, dim, coord_dims, dict_size) -> None:
+        super().__init__()
+        self.dim = dim
+        self.coord_dims = coord_dims
+        self.dict_size = dict_size
+
+        self.to_token_logits = nn.Sequential(
+            LayerNorm(dim),
+            nn.Linear(dim, dict_size, bias=False)
+        )
+        self.to_coord_logits = nn.Sequential(
+            LayerNorm(dim),
+            nn.Linear(dim, coord_dims, bias=False)
+        )
+    
+    def forward(self, x):
+        token_logits = self.to_token_logits(x)
+        coord_logits = self.to_coord_logits(x)
+        return torch.cat((coord_logits, token_logits), dim=-1)
+
 
 class TrajectoryEmbedding(nn.Module):
-    def __init__(self, coord_dims, tokens, dim) -> None:
+    def __init__(self, coord_dims, tokens, dim, data_format='') -> None:
         super().__init__()
         self.coord_dims = coord_dims
         self.tokens = tokens
         self.dim = dim
+        self.data_format = data_format
         self.check_for_fill = torch.isinf
 
         self.embed_coord = nn.Linear(coord_dims, dim)
         if self.tokens is not None:           
             self.embed_token = nn.Embedding(len(tokens), dim)
+        
+        if self.data_format == 'full_tokenized_by_frame':
+            self.coord_network = nn.Sequential(nn.Linear(10, 100), nn.Linear(100, 1))
+            # every x- and y-digit with the same weight/influence as [BOS], [EOS], ... does not make sense --> full/partial hybrid?: same but no regression problem, but actually classification
 
     def tokenize(self, token):
-        return self.tokens.index(token) 
+        return self.tokens.index(token)
 
 
     def forward(self, obs, all_tokens):
 
+        if self.data_format == 'full_tokenized_by_frame':
+            # get all traj tokens
+            is_traj_mask = torch.argwhere(all_tokens[:,:,1] != -1)
+            traj_tokens = all_tokens[is_traj_mask[:,0], is_traj_mask[:,1], :]
+            assert torch.all(traj_tokens != -1)
+            # get all non traj tokens
+            is_not_traj_mask = torch.argwhere(all_tokens[:,:,1] == -1)
+            non_traj_tokens = all_tokens[is_not_traj_mask[:,0], is_not_traj_mask[:,1], 0]
+            assert torch.all(all_tokens[is_not_traj_mask[:,0], is_not_traj_mask[:,1], 1:] == -1)
+
+            traj_tokens = self.embed_token(traj_tokens)
+            non_traj_tokens = self.embed_token(non_traj_tokens)
+
+            traj_tokens = self.coord_network(traj_tokens.permute(0,2,1)).squeeze(2)
+
+            # is_traj_mask_np = is_traj_mask.detach().cpu().numpy()
+            # is_not_traj_mask_np = is_not_traj_mask.detach().cpu().numpy()
+            tokens_tensor = torch.full((all_tokens.shape[0], all_tokens.shape[1], self.dim), fill_value=float('-inf'), dtype=torch.float32, device=all_tokens.device)
+
+            # Fill the tensor using indices from indices1 and indices2
+            tokens_tensor[is_traj_mask[:, 0], is_traj_mask[:, 1], :] = traj_tokens
+            tokens_tensor[is_not_traj_mask[:, 0], is_not_traj_mask[:, 1], :] = non_traj_tokens
+
+            assert torch.all(torch.isfinite(tokens_tensor))
+            return tokens_tensor
+
         is_traj_mask = self.check_for_fill(obs)[:,:,0]
         
-        # TODO check inf coords before and after pass
         # TODO turn off assertions after one batch
         if all_tokens is not None:
             assert torch.equal(self.check_for_fill(obs)[:,:,0], self.check_for_fill(obs)[:,:,1]), 'obs masks on x- and y-direction need to be equal!'
@@ -768,6 +841,8 @@ class TrajectoryEmbedding(nn.Module):
         
         obs = obs.masked_fill(is_traj_mask.unsqueeze(-1).repeat(1, 1, obs.size(-1)), 0)
         coord_emb = self.embed_coord(obs)
+        # check inf coords before and after pass
+        assert torch.all(torch.isinf(coord_emb)[:,:,0] == torch.isinf(obs)[:,:,0]) and torch.all(torch.isinf(coord_emb)[:,:,443] == torch.isinf(obs)[:,:,1])
 
         if self.tokens is not None:
             token_emb = self.embed_token(all_tokens)

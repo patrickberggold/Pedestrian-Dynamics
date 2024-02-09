@@ -55,9 +55,9 @@ class dataset_set_name(BaseDataset):
 
         transform = A.Compose([
             # SAFE AUGS, flips and 90rots
-            A.augmentations.transforms.HorizontalFlip(p=0.5),
-            A.augmentations.transforms.VerticalFlip(p=0.5),
-            A.augmentations.transforms.Transpose(p=0.5),
+            A.augmentations.geometric.transforms.HorizontalFlip(p=0.5),
+            A.augmentations.geometric.transforms.VerticalFlip(p=0.5),
+            A.augmentations.geometric.transforms.Transpose(p=0.5),
             A.augmentations.geometric.rotate.RandomRotate90(p=1.0),
 
             # HIGH RISKS - HIGH PROBABILITY OF KEYPOINTS GOING OUT

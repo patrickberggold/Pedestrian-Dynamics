@@ -1,55 +1,82 @@
 import os
 import time
-import torch
 import matplotlib.pyplot as plt
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
-import numpy as np
 from Modules.Seq2SeqModule import Seq2SeqModule
+from Modules.Seq2SeqModule_GAN import Seq2SeqModule_GAN
 from Datamodules import FloorplanDatamodule
-from collections import OrderedDict
-from helper import SEP, linemaker, dir_maker
+from helper import SEP, dir_maker, load_module_from_checkpoint, visualize_trajectories
 # from hyperparameter_optim import hyperparameter_optimization
 
 MULIT_GPU = False
-CUDA_DEVICE = 1
-MODE = 'TRAJ_PRED' # TRAJ_PRED, MTM
-DATA_FORMAT = 'random' # by_frame, random, tokenized
+CUDA_DEVICE = 0
+MODE = 'TRAJ_PRED' # TRAJ_PRED, MTM, GOAL_PRED, SEGMENTATION
+DATA_FORMAT = 'by_frame' # by_frame, by_frame_masked, random, partial_tokenized_random, partial_tokenized_by_frame, full_tokenized_by_frame
 
 do_vision_pretraining = False
+
 do_training = True
-test_run = True
-save_model = False
+test_run = False
+save_model = True
 
 CONFIG = {
     # GENERAL
     'mode': MODE, # TRAJ_PRED, MTM
-    'arch': 'coca', # tf, coca, goal
+    'arch': 'adv_goal', # tf, coc, goal, coca_goal, gan_goal, simple_goal, adv_goal
     'img_arch': 'SegFormer', # BeIT, SegFormer
     'cuda_device': CUDA_DEVICE,
     'imgs_per_batch': 1,
-    'load_from_ckpt': None, # 'coca_ff_mult1_wholeDS_pos_random_normalized_epoch=1-step=38654.ckpt',
-    'save_ckpt': 'coca_new', # 'coca_ff_mult1_wholeDS_pos_random_normalized_WSL_+1',
+    'load_from_ckpt': None, # 'Advanced__Obs8_Pred12_Enc3_fus2__cont+ep29',
+    'save_ckpt': None,
     'save_model': save_model,
+    'save_results': True,
     # TESTRUN
     'test_run': test_run,
-    'limit_dataset': None,
+    'limit_dataset': 5,
     'limit_train_batches': 2 if test_run else None,
     'limit_val_batches': 2 if test_run else None,
     # DATALOADING
     'traj_quantity': 'pos', # pos, vel
-    'data_format' : DATA_FORMAT, # by_frame, random, tokenized
+    'data_format' : DATA_FORMAT, # by_frame, random, partial_tokenized_random, full_tokenized_by_frame, partial_tokenized_by_frame
     'normalize_dataset': True,
-    'seq_length': 20,
-    'num_obs_steps': 8,
     'read_from_pickle': False,
+    'grad_clip': 10.0,
+    'resize_factor': 2,
+    'ds_mean': 320., # 1280 // self.resize_factor / 2, 150 / self.resize_factor
+    'ds_std': 320.,
+    'goal_predictor': 'resnet18', # unet, resnet18
+    'num_obs_steps': 12,
+    'pred_length': 8,
 }
 
-description_log = 'Standard CoCa for presentation purposes (random, TRAJ_PRED, 8-20 split)'
-if (not test_run) and save_model:
-    store_folder_path = SEP.join(['TrajectoryPrediction', 'checkpoints', CONFIG['save_ckpt']])
-    dir_maker(store_folder_path, description_log)
+TRAIN_CONFIG = {
+    'learning_rate': 0.0003,
+    'lr_scheduler': 'ReduceLROnPlateau', # ReduceLROnPlateau, CosineAnnealingLR, StepLR, ExponentialLR
+    'lr_sch_step_size': 5, # 100 if lr_scheduler==CosineAnnealingLR.__name__ else 5 # lr_sch_step_size
+    'lr_sch_gamma': 0.5,
+    'lr_sch_patience4redOnPlat': 7,
+    'dim': 512,
+    'num_enc_layers': 3, # 1, 2, 3
+    'num_dec_layers': 3, # 1, 2, 3
+    'ff_mult': 1, # 1, 2, 4
+    'init': 'xavier',
+    ### optimization params:
+    'coords_normed': False,
+    'separate_fut_agent_batches': False, # not now
+    'predict_additive': True,
+    'separate_obs_agent_batches': True,
+    'fuse_option': 2, # 1, 2, 3
+}
+
+# CONFIG['save_ckpt'] = 'Advanced__Obs'+str(CONFIG['num_obs_steps'])+'_Pred'+str(CONFIG['pred_length'])+'_Enc'+str(TRAIN_CONFIG['num_enc_layers'])+'_fus'+str(TRAIN_CONFIG['fuse_option'])
+
+if (not test_run) and save_model and do_training:
+    description_log = 'Standard CoCa for presentation purposes (random, TRAJ_PRED, 8-20 split)'
+    store_folder_path = SEP.join(['TrajectoryPrediction', 'Modules', 'coca', 'checkpoints', CONFIG['save_ckpt']])
+    CONFIG.update({'store_path': store_folder_path+SEP+'results.txt'})
+    dir_maker(store_folder_path, description_log, CONFIG, TRAIN_CONFIG)
 
 
 if __name__ == '__main__':
@@ -62,39 +89,24 @@ if __name__ == '__main__':
         quit()
 
     datamodule = FloorplanDatamodule(config=CONFIG)
+    
+    if MODE in ['GOAL_PRED', 'SEGMENTATION']:
+        from goal_prediction import goal_prediction 
+        goal_prediction(CONFIG, datamodule)        
+        quit()
 
+    module = Seq2SeqModule(config=CONFIG, train_config=TRAIN_CONFIG) if CONFIG['arch'] != 'gan_goal' else Seq2SeqModule_GAN(config=CONFIG, train_config=TRAIN_CONFIG)
+    if CONFIG['load_from_ckpt']:
+        # sss0 = module.state_dict().copy()
+        module = load_module_from_checkpoint(module, CONFIG['load_from_ckpt'])
+        # sss1 = module.state_dict().copy()
+    
     if do_training:
 
-        module = Seq2SeqModule(config=CONFIG, learning_rate=5e-4, lr_scheduler='ReduceLROnPlateau', lr_sch_gamma=0.3)
+        # callbacks = [EarlyStopping(monitor="val_loss", mode="min", patience=50), LearningRateMonitor(logging_interval='epoch')]
+        callbacks = [LearningRateMonitor(logging_interval='epoch')]
 
-        if CONFIG['load_from_ckpt']:
-            CKPT_PATH = SEP.join(['TrajectoryPrediction', 'checkpoints', CONFIG['load_from_ckpt']])
-            model_file_path = [file for file in os.listdir(CKPT_PATH) if file.endswith('.ckpt') and not file.startswith('last')]
-            assert len(model_file_path) == 1
-            CKPT_PATH = SEP.join([CKPT_PATH, model_file_path[0]])
-            state_dict = torch.load(CKPT_PATH)['state_dict']
-            module_state_dict = module.state_dict()
-
-            mkeys_missing_in_loaded = [module_key for module_key in list(module_state_dict.keys()) if module_key not in list(state_dict.keys())]
-            lkeys_missing_in_module = [loaded_key for loaded_key in list(state_dict.keys()) if loaded_key not in list(module_state_dict.keys())]
-            assert len(mkeys_missing_in_loaded) < 10 or len(lkeys_missing_in_module) < 10, 'Checkpoint loading went probably wrong...'
-
-            load_dict = OrderedDict()
-            for key, tensor in module_state_dict.items():
-                if key in state_dict.keys() and tensor.size()==state_dict[key].size():
-                    load_dict[key] = state_dict[key]
-                else:
-                    # if key == 'model.model.classifier.classifier.weight':
-                    #     load_dict[key] = state_dict['model.model.classifier.weight']
-                    # else:
-                    #     load_dict[key] = tensor
-                    load_dict[key] = tensor
-
-            module.load_state_dict(load_dict)
-
-        callbacks = [EarlyStopping(monitor="val_loss", mode="min", patience=8), LearningRateMonitor(logging_interval='epoch')]
-
-        if (not CONFIG['run_test_epoch']) and save_model:
+        if (not CONFIG['test_run']) and save_model:
             model_checkpoint = ModelCheckpoint(
                 dirpath = store_folder_path,
                 filename = 'model_{epoch}-{step}',
@@ -102,22 +114,22 @@ if __name__ == '__main__':
                 verbose = True, 
                 monitor = 'val_loss',
                 mode = 'min',
-                save_last=False
+                save_last=True
             )
             callbacks.append(model_checkpoint) # TODO print lr each epoch for checking + turn of lightning logger if possible
 
         # from pytorch_lightning.strategies import DDPStrategy
         # stategy = DDPStrategy(process_group_backend="gloo") # nccl
         trainer = pl.Trainer(
-            gpus = [CUDA_DEVICE] if not MULIT_GPU else None, 
-            devices=f'cuda:{str(CUDA_DEVICE)}' if not MULIT_GPU else [0,1],# '0, 1', 
+            gpus = [CUDA_DEVICE], 
+            devices=f'cuda:{str(CUDA_DEVICE)}', 
             max_epochs = 500, 
+            # checkpoint_callback = [checkpoint_callback], 
             callbacks=callbacks,
             limit_train_batches=CONFIG['limit_train_batches'],
             limit_val_batches=CONFIG['limit_val_batches'],
-            accelerator=None if not MULIT_GPU else 'gpu',
-            # strategy=None if not MULIT_GPU else stategy # 'ddp'
-            # logger=False,
+            # progress_bar_refresh_rate=125,
+            gradient_clip_val=CONFIG['grad_clip'],
             )
 
         start_training_time = time.time()
@@ -128,31 +140,6 @@ if __name__ == '__main__':
 
         quit()
 
-    CKPT_PATH = SEP.join(['TrajectoryPrediction', 'checkpoints', CONFIG['load_from_ckpt']])
-    state_dict = OrderedDict([(key, tensor) for key, tensor in torch.load(CKPT_PATH)['state_dict'].items()])
-
-    module = Seq2SeqModule(config=CONFIG, learning_rate=5e-4, lr_scheduler='ReduceLROnPlateau', lr_sch_gamma=0.3)
-    module_state_dict = module.state_dict()
-    
-    mkeys_missing_in_loaded = [module_key for module_key in list(module_state_dict.keys()) if module_key not in list(state_dict.keys())]
-    lkeys_missing_in_module = [loaded_key for loaded_key in list(state_dict.keys()) if loaded_key not in list(module_state_dict.keys())]
-
-    load_dict = OrderedDict()
-    for key, tensor in module_state_dict.items():
-        # if (key in state_dict.keys()) and ('decode_head' not in key):
-        if key in state_dict.keys():
-            load_dict[key] = state_dict[key]
-        else:
-            # if key == 'model.model.classifier.classifier.weight':
-            #     load_dict[key] = state_dict['model.model.classifier.weight']
-            # elif key == 'model.model.classifier.classifier.bias': 
-            #     load_dict[key] = state_dict['model.model.classifier.bias']
-            # else:
-            #     load_dict[key] = tensor
-            load_dict[key] = tensor
-
-    module.load_state_dict(load_dict)
-
     module.to(f'cuda:{CUDA_DEVICE}')
     module.eval()
 
@@ -161,122 +148,36 @@ if __name__ == '__main__':
     # batchy = dataloader.dataset.__getitem__(15)
     
     test_result_folder = 'TrajectoryPrediction'+SEP+'image_results'
-    if not os.path.isdir(test_result_folder): os.mkdir(test_result_folder)
+    # if not os.path.isdir(test_result_folder): os.mkdir(test_result_folder)
 
     for idx, batch in enumerate(dataloader):
-        images = batch[0]
-        plt.imshow(np.moveaxis(images.squeeze().detach().cpu().numpy(), 0, -1))
+
+        prediction = module.model.forward({key: tensor.to(f'cuda:{CUDA_DEVICE}') for key, tensor in batch.items()})
+        pred_trajectories = prediction['pred_coords'].cpu()
+
+        image = batch['image'].squeeze(0).permute(1, 2, 0).cpu().numpy()
+        abs_coordinates = batch['coords'].squeeze(0) if 'coords' in batch else None
+        velocities = batch['transformed_velocities'].squeeze(0) if 'velocity' in batch else None
+        occupancyMaps_egocentric = batch['occupancyMaps_egocentric'].permute(1, 0, 2, 3) if 'occupancyMaps_egocentric' in batch else None
+        semanticMaps_per_agent = batch['semanticMaps_per_agent'].permute(3, 0, 1, 2) if 'semanticMaps_per_agent' in batch else None
+        transformed_agent_destinations = batch['transformed_agent_destinations'].squeeze(0) if 'transformed_agent_destinations' in batch else None
+        all_scene_destinations = batch['all_scene_destinations'].squeeze(0) if 'all_scene_destinations' in batch else None
+
+        mse_loss, ade_loss, fde_loss = module.model.compute_mse_and_ade(pred_trajectories, abs_coordinates[:, CONFIG['num_obs_steps']:, :], abs_coordinates[:, CONFIG['num_obs_steps']-1, :])
+        
+        # hardcoded for now
+        if not module.model.coords_normed: pred_trajectories = module.model.denormalize([pred_trajectories]) 
+        # pred_trajectories += 320.
+        # abs_coordinates += 320.
+
+        # prepate coordinates
+        abs_coordinates = abs_coordinates.numpy()
+        pred_trajectories = pred_trajectories.numpy()
+        obs_coords = abs_coordinates[:, :CONFIG['num_obs_steps'], :]
+        gt_fut_coords = abs_coordinates[:, CONFIG['num_obs_steps']:, :]
+
+        assert gt_fut_coords.shape == pred_trajectories.shape
+
+        image_draw = visualize_trajectories(abs_coordinates, pred_trajectories, image, CONFIG['num_obs_steps'])
+        plt.imshow(image_draw)
         plt.close('all')
-        gt_coordinates = batch[1].squeeze(0)
-
-        # batch = {k: v.squeeze(0).float().to(f'cuda:{CUDA_DEVICE}') for k, v in batch.items() if k not in ['scene_data', 'type']}
-        # tensor_image = batch['tensor_image']
-        batch = [batch_item.to(f'cuda:{CUDA_DEVICE}') for batch_item in batch]
-        
-        all_output = module.net.forward(batch, train=True) # TODO if False, why OOM error?
-        pred_coordinates = all_output[0].squeeze().detach().cpu()
-
-        if CONFIG['traj_quantity'] == 'pos' and CONFIG['normalize_dataset']:
-            gt_coordinates = gt_coordinates * dataloader.dataset.overall_std + dataloader.dataset.overall_mean
-            pred_coordinates = pred_coordinates * dataloader.dataset.overall_std + dataloader.dataset.overall_mean
-
-        if CONFIG['arch'] == 'goal':
-            pred_coordinates = pred_coordinates[0]
-        import random
-        from skimage.draw import line
-        img_np = images.squeeze().permute(1, 2, 0).detach().numpy()
-        img_input = img_np.copy()
-        import torch.nn.functional as F
-        mse = F.mse_loss(pred_coordinates, gt_coordinates[:, 8:])
-        
-        pred_coordinates = pred_coordinates.numpy()
-        gt_coordinates = gt_coordinates.detach().cpu().numpy()
-        limit_pred_agents = 4
-        
-        # trajs = [traj.detach().cpu().numpy() for traj in pred_coordinates]
-        
-        if CONFIG['arch'] == 'tf':
-            trajs = [traj.detach().cpu().numpy() for traj in pred_coordinates[:, :limit_pred_agents]]
-            gt_traj = [traj.detach().cpu().numpy() for traj in batch['abs_pixel_coord'][:, :limit_pred_agents]]
-
-            trajs = gt_traj[:8] + trajs
-            trajs = np.stack(trajs, axis=0)
-            trajs = trajs.swapaxes(0, 1)
-            trajs = [traj for traj in trajs]
-        
-        obs_cols = [
-            np.array([1.0, 0.65, 0]), np.array([.8, 0.55, 0]), np.array([.9, .75, 0]),
-            np.array([.7, 0.7, 0]), np.array([1.0, 0.9, 0]), np.array([.5, 0.85, 0]),
-        ]
-
-        for ida, agent_traj in enumerate(gt_coordinates[:limit_pred_agents]):
-            old_point = None
-            r_val = random.uniform(0.4, 1.0)
-            b_val = random.uniform(0.7, 1.0)
-            for idp, coord in enumerate(agent_traj):
-                
-                x_n, y_n = round(coord[0]), round(coord[1])
-                # assert 0 <= x_n <= img_np.shape[1] and 0 <= y_n <= img_np.shape[0]
-                
-                if old_point != None:
-                    # cv2.line(img_np, (old_point[1], old_point[0]), (y_n, x_n), (0, 1.,0 ), thickness=5)
-                    # c_line = [coord for coord in zip(*line(*(old_point[0], old_point[1]), *(x_n, y_n)))]
-                    c_line = linemaker((old_point[0], old_point[1]), (x_n, y_n), thickness=3)
-                    c_line = [item for sublist in c_line for item in sublist]
-                    for c in c_line:
-                        if idp < 8:
-                            col = obs_cols[ida]-np.array([0.15, 0.15, 0.]) # make observations a bit darker
-                        else:
-                            col = obs_cols[ida]
-                        img_np[c[1], c[0]] = col
-                    # plt.imshow(img_np)
-                old_point = (x_n, y_n)
-
-                if idp == 7:
-                    old_pred_point = (x_n, y_n)
-                if idp >= 8:
-                    pred_traj_coord = pred_coordinates[ida, idp-8, :]
-                    x_n, y_n = round(pred_traj_coord[0]), round(pred_traj_coord[1])
-
-                    if 0 > x_n or x_n > img_np.shape[1]:
-                        print(f'x value exceeded!! {x_n} not within bounds!')
-                        x_n = np.clip(x_n, 0, img_np.shape[1])
-                    if 0 > y_n or y_n > img_np.shape[0]:
-                        print(f'y value exceeded!! {y_n} not within bounds!')
-                        y_n = np.clip(y_n, 0, img_np.shape[0])
-                    # c_line = [coord for coord in zip(*line(*(old_gt_point[0], old_gt_point[1]), *(x_n, y_n)))]
-                    c_line = linemaker((old_pred_point[0], old_pred_point[1]), (x_n, y_n), thickness=3)
-                    c_line = [item for sublist in c_line for item in sublist]
-                    for c in c_line:
-                        col = np.array([r_val, 0., b_val])
-                        img_np[c[1], c[0]] = col
-
-                    old_pred_point = (x_n, y_n)
-
-            plt.imshow(img_np)
-            plt.close('all')
-
-        # for traj in trajs:
-        #     old_point = None
-        #     r_val = random.uniform(0.4, 1.0)
-        #     b_val = random.uniform(0.7, 1.0)
-        #     for idp, point in enumerate(traj):
-        #         x_n, y_n = round(point[0]), round(point[1])
-        #         assert 0 <= x_n <= img_np.shape[1] and 0 <= y_n <= img_np.shape[0]
-        #         if old_point != None:
-        #             # cv2.line(img_np, (old_point[1], old_point[0]), (y_n, x_n), (0, 1.,0 ), thickness=5)
-        #             c_line = [coord for coord in zip(*line(*(old_point[0], old_point[1]), *(x_n, y_n)))]
-        #             for c in c_line:
-        #                 if idp < 8:
-        #                     col = obs_col
-        #                 else:
-        #                     col = np.array([r_val, 0., b_val])
-        #                 img_np[c[1], c[0]] = col
-        #             # plt.imshow(img_np)
-        #         old_point = (x_n, y_n)
-
-        # cv2.imshow('namey', img_np)
-        # plt.imshow(img_np)
-        # plt.close('all')
-        # plt.imshow(img_input)
-        # plt.close('all')

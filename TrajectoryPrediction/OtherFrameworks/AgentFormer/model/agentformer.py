@@ -145,7 +145,8 @@ class ContextEncoder(nn.Module):
                 hv = data['heading_vec'].unsqueeze(0).repeat((data['pre_motion'].shape[0], 1, 1))
                 traj_in.append(hv)
             elif key == 'map':
-                map_enc = data['map_enc'].unsqueeze(0).repeat((data['pre_motion'].shape[0], 1, 1)) # IN: (24, 512, 800, 800) ---> OUT: 
+                # map_enc = data['map_enc'].unsqueeze(0).repeat((data['pre_motion'].shape[0], 1, 1)) # IN: (24, 512, 800, 800) ---> OUT: 
+                map_enc = torch.rand((8, 24, 225), device=data['pre_motion'].device, dtype=torch.float32)
                 traj_in.append(map_enc)
             else:
                 raise ValueError('unknown input_type!')
@@ -497,7 +498,7 @@ class AgentFormer(nn.Module):
             from .encoder_lightning.map_encoder_lightning import Image2ImageModule
 
             # CKPT_PATH = '\\'.join(['TrajectoryPrediction','sophie','feature_extractor','checkpoints', 'model_deeplab_img2img_epoch=4-step=780.ckpt'])
-            CKPT_PATH = '\\'.join(['TrajectoryPrediction','sophie','feature_extractor','checkpoints', 'model_vgg_img2img_epoch=54-step=8580.ckpt'])
+            CKPT_PATH = '\\'.join(['TrajectoryPrediction','OtherFrameworks','sophie','feature_extractor','checkpoints', 'model_vgg_img2img_epoch=54-step=8580.ckpt'])
 
             # state_dict = OrderedDict([(key, tensor) if key.startswith('net.') else (key, tensor) for key, tensor in torch.load(CKPT_PATH)['state_dict'].items()])
             dict_list = []

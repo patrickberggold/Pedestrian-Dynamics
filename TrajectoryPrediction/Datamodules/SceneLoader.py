@@ -4,18 +4,23 @@ import pandas as pd
 from helper import SEP
 from collections import OrderedDict
 import numpy as np
+import cv2
 from PIL import Image
 import h5py
 import sparse
 
 class Scene_floorplan():
-    def __init__(self, img_path, csv_path, verbose=False):
+    def __init__(self, img_path, csv_path, semanticMap_path=None, global_semanticMap_path=None, find_dsts=False, verbose=False):
         super().__init__()
         self.RGB_image_path = img_path
         self.raw_scene_data_path = csv_path
+        self.semanticMap_path = semanticMap_path
+        self.global_semanticMap_path = global_semanticMap_path
 
         assert os.path.isfile(self.RGB_image_path)
         assert os.path.isfile(self.raw_scene_data_path)
+        if semanticMap_path is not None: assert os.path.isfile(self.semanticMap_path)
+        if global_semanticMap_path is not None: assert os.path.isfile(self.global_semanticMap_path)
 
         self.column_names = [
             'frame_id',
@@ -37,6 +42,7 @@ class Scene_floorplan():
             ('origin', 'red'),
             ('destination', 'green'),
         ])
+        self.new_ds = True # includes destinations in the first row of the csv file, and also includes semantic maps for each agent
 
         self.frames_per_second = 2
         self.delta_frame = 1
@@ -50,8 +56,11 @@ class Scene_floorplan():
         # self.semantic_map_pred = self._load_rec_img()
         # import matplotlib.pyplot as plt
         # plt.imshow(self.RGB_image)
+        layout_type = img_path.split(SEP)[-4]
+        self.destinations = []
+        # assuming that all floorplans have a padded real-world length/width of 64m
 
-        layout_type = img_path.split(SEP)[-2]
+        assert layout_type in ['corr_e2e', 'corr_cross'], 'train stations do not have the same floorplan size'
         self.floorplan_min_x = 0
         self.floorplan_max_x = float(img_path.split('siteX_')[-1].split('_')[0])
         self.floorplan_min_y = 0
@@ -71,6 +80,37 @@ class Scene_floorplan():
         # self.raw_pixel_data = self._make_pixel_coord_pandas(self._load_raw_data_table(self.raw_scene_data_path))
         self.raw_pixel_data = self._load_raw_data_table(self.raw_scene_data_path)
 
+        if find_dsts:
+            destinations = []
+            # find all green rectangles in the image
+            import matplotlib.pyplot as plt
+            np_image = sparse.load_npz(self.RGB_image_path).todense()
+            bgr_image = cv2.cvtColor(np_image, cv2.COLOR_RGB2BGR)
+            lower_green = np.array([0, 100, 0], dtype=np.uint8)
+            upper_green = np.array([100, 255, 100], dtype=np.uint8)
+            mask = cv2.inRange(bgr_image, lower_green, upper_green)
+            contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            for contour in contours:
+                x, y, w, h = cv2.boundingRect(contour)
+                if w < 10 or h < 10:
+                    continue
+                destinations.append((x, y, x+w, y+h))
+                cv2.rectangle(bgr_image, (x, y), (x + w, y + h), (150, 0, 150), 3)
+                rgb_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
+            
+            # plt.imshow(rgb_image)
+            assert 0 < len(destinations) < 3, 'destinations must be between 1 and 2'
+            # plt.close('all')
+            if self.all_scene_destinations == []: self.all_scene_destinations = destinations
+            else:
+                np_destinations = np.array(destinations)
+                np_self_destinations = np.array(self.all_scene_destinations)
+                # sort arrays
+                np_destinations = np_destinations[np.argsort(np_destinations[:, 0])]
+                np_self_destinations = np_self_destinations[np.argsort(np_self_destinations[:, 0])]
+                diffs = np.abs(np_destinations - np_self_destinations)
+                assert np.all(diffs < 2), 'destinations must be the same for all scenes'
+
     def _load_RGB_image(self):
         if self.RGB_image_path.endswith('.jpeg') or self.RGB_image_path.endswith('.jpg'):
             with Image.open(self.RGB_image_path) as f:
@@ -88,17 +128,35 @@ class Scene_floorplan():
 
     def _load_raw_data_table(self, path):
         # load .csv raw data table with header
+        if self.new_ds:
+            skiprows = [0]
+            f = open(path, 'r')
+            destinations_str = f.readlines()[0]
+            f.close()
+            self.destinations_per_agent = [[int(dc) for dc in dest] for dest in [d.split('[')[-1].split(']')[0].split(',') for d in destinations_str.split(';')]]
+            destinations_set = set()
+            # remove duplicates
+            for dst in self.destinations_per_agent:
+                destinations_set.add(tuple(dst))
+            self.all_scene_destinations = [list(entry_tuple) for entry_tuple in destinations_set]    
+        else:
+            skiprows = None
         raw_data = pd.read_csv(path,
                                engine='python',
                                header=None,
-                               skiprows=None,
+                               skiprows=skiprows,
                                names=self.column_names,
                                dtype=self.column_dtype)
 
         columns_to_drop = []
         raw_data = raw_data.drop(columns=columns_to_drop)
         # convert timestamps to frame ids
-        raw_data.frame_id= raw_data.frame_id*2-1
+        if raw_data.frame_id.values[0] == 1.0:
+            raw_data.frame_id = raw_data.frame_id*2-1
+        elif raw_data.frame_id.values[0] == 0.0:
+            raw_data.frame_id = raw_data.frame_id*2+1
+        else:
+            raise NotImplementedError
         raw_data.frame_id = raw_data.frame_id.astype(int)
         return raw_data
 

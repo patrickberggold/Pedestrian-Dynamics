@@ -240,7 +240,7 @@ def check_and_add_additional_args(args):
         args.num_test_runs = 1
         args.start_validation = 0
     # set directories
-    args.base_dir = 'TrajectoryPrediction/Goal-SAR'  # base directory
+    args.base_dir = os.sep.join(['TrajectoryPrediction','OtherFrameworks','Goal-SAR'])  # base directory
     args.save_base_dir = 'output'  # for saving output and models
     args.save_dir = os.path.join(
         args.base_dir, args.save_base_dir, str(args.test_set))

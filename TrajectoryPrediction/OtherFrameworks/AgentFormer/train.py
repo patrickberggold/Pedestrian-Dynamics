@@ -20,7 +20,7 @@ torch.backends.cudnn.enabled = True
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
 
-CUDA_DEVICE = 0
+CUDA_DEVICE = 1
 
 def logging(cfg, epoch, total_epoch, iter, total_iter, ep, seq, frame, losses_str, log):
 	print_log('{} | Epo: {:02d}/{:02d}, '

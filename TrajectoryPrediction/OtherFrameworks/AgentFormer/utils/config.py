@@ -11,13 +11,13 @@ class Config:
 
     def __init__(self, cfg_id, tmp=False, create_dirs=False):
         self.id = cfg_id
-        cfg_path = 'TrajectoryPrediction/AgentFormer/cfg/**/%s.yml' % cfg_id
+        cfg_path = 'TrajectoryPrediction/OtherFrameworks/AgentFormer/cfg/**/%s.yml' % cfg_id
         files = glob.glob(cfg_path, recursive=True)
         assert(len(files) == 1)
         self.yml_dict = EasyDict(yaml.safe_load(open(files[0], 'r')))
 
         # data dir
-        self.results_root_dir = os.path.join('TrajectoryPrediction', 'AgentFormer', os.path.expanduser(self.yml_dict['results_root_dir']))
+        self.results_root_dir = os.path.join('TrajectoryPrediction', 'OtherFrameworks', 'AgentFormer', os.path.expanduser(self.yml_dict['results_root_dir']))
         # results dirs
         cfg_root_dir = '/tmp/agentformer' if tmp else self.results_root_dir
         self.cfg_root_dir = os.path.expanduser(cfg_root_dir)

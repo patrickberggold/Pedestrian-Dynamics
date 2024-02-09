@@ -22,7 +22,8 @@ from torch.nn.init import constant_
 from torch.nn.init import xavier_normal_
 from torch.nn.parameter import Parameter
 from torch.overrides import has_torch_function, handle_torch_function
-
+from torch import Tensor
+from typing import Tuple, Optional
 
 def agent_aware_attention(query: Tensor,
                           key: Tensor,
