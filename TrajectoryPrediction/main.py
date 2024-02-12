@@ -19,7 +19,7 @@ do_vision_pretraining = False
 
 do_training = True
 test_run = False
-save_model = True
+save_model = False
 
 CONFIG = {
     # GENERAL
