@@ -59,6 +59,8 @@ class ObjDetModule(pl.LightningModule):
         self.true_boxes, self.true_labels = [], []
 
         self.img_max_width, self.img_max_height = config['img_max_size']
+        self.save_results = config['save_results']
+        self.txt_path = config['store_path'] if self.save_results and 'store_path' in config else None
 
         if self.arch == 'Detr':
             from transformers import DetrForObjectDetection, DetrConfig
@@ -386,7 +388,7 @@ class ObjDetModule(pl.LightningModule):
             
             pred_boxes, pred_labels, confidences = [], [], []
             for p in predictions:
-                p_box = xywhn2xyxy(p[:,:4], self.img_max_height, self.img_max_width)
+                p_box = xywhn2xyxy(p[:,:4], self.img_max_width, self.img_max_height)
                 pred_boxes.append(p_box)
                 confidences.append(p[:, 4:5].squeeze())
                 pred_labels.append(p[:, 5:6].long().squeeze())
@@ -397,7 +399,7 @@ class ObjDetModule(pl.LightningModule):
                 mask = target[:, 0] == id_
                 labels_i = target[mask, 1].long()
                 boxes_i = target[mask, 2:6]
-                boxes_i = xywhn2xyxy(boxes_i, self.img_max_height, self.img_max_width)
+                boxes_i = xywhn2xyxy(boxes_i, self.img_max_width, self.img_max_height)
                 true_boxes.append(boxes_i)
                 true_labels.append(labels_i)
 
@@ -723,10 +725,16 @@ class ObjDetModule(pl.LightningModule):
                 for batch in test_dataloader:
                     batch_d = (batch[0].to(self.device), tuple([l.to(self.device) for l in batch[1]]), tuple([b.to(self.device) for b in batch[2]]), batch[3].to(self.device))
                     self.test_step(batch_d) 
-                map_sbahn, f1_score_sbahn, _ = metrics_sklearn(self.true_boxes_test[:3], self.true_labels_test[:3], self.pred_boxes_test[:3], self.pred_labels_test[:3], self.confidences_test[:3], verbose=True)
-                map_u9, f1_score_u9, _ = metrics_sklearn(self.true_boxes_test[3:], self.true_labels_test[3:], self.pred_boxes_test[3:], self.pred_labels_test[3:], self.confidences_test[3:], verbose=True)
-                self.internal_log({'AP S-Bahn': map_sbahn}, stage='val')
-                self.internal_log({'AP U9': map_u9}, stage='val')
+                map_u9_old, f1_score_sbahn, stats_u9_old = metrics_sklearn(self.true_boxes_test[:3], self.true_labels_test[:3], self.pred_boxes_test[:3], self.pred_labels_test[:3], self.confidences_test[:3], verbose=True)
+                map_u9_new, f1_score_u9_new, stats_u9_new = metrics_sklearn(self.true_boxes_test[3:6], self.true_labels_test[3:6], self.pred_boxes_test[3:6], self.pred_labels_test[3:6], self.confidences_test[3:6], verbose=True)
+                self.internal_log({'AP U9 old': map_u9_old}, stage='val')
+                self.internal_log({'AP U9 new': map_u9_new}, stage='val')
+                if True: # map_u9_old > 0.9:
+                    s_o_tps, s_o_fps, s_o_fns = stats_u9_old['tps'], stats_u9_old['fps'], stats_u9_old['fns']
+                    print(f'[map_u9_old = {map_u9_old}]: tps={s_o_tps}, fps={s_o_fps}, fns={s_o_fns}')
+                if True: #map_u9_new > 0.9:
+                    s_n_tps, s_n_fps, s_n_fns = stats_u9_new['tps'], stats_u9_new['fps'], stats_u9_new['fns']
+                    print(f'[map_u9_new = {map_u9_new}]: tps={s_n_tps}, fps={s_n_fps}, fns={s_n_fns}')
         return super().on_validation_epoch_end()
 
 
@@ -751,8 +759,8 @@ class ObjDetModule(pl.LightningModule):
         self.train_losses = {}
         self.val_losses = {}
         
-        print('\nTRAINING RESULT:')
-        train_string = f'Epoch\t'
+        # print('\nTRAINING RESULT:')
+        train_string = f'TRAINING RESULT:\nEpoch\t'
         train_vals = [val for val in self.train_losses_per_epoch.values()]
         for id_k, key in enumerate(list(self.train_losses_per_epoch.keys())):
             if id_k == 0:
@@ -766,11 +774,11 @@ class ObjDetModule(pl.LightningModule):
                     # print(f"{Decimal('0.0000000201452342000'):.8e}")
                 else:
                     train_string += f'\t\t{Decimal(train_vals[i_loss][i_epoch]):.3e}'
-        print(train_string) 
+        print('\n\n'+train_string) 
 
 
-        print('\nVALIDATION RESULT:')
-        val_string = f'Epoch\t'
+        # print('\nVALIDATION RESULT:')
+        val_string = f'\nVALIDATION RESULT:\nEpoch\t'
         val_vals = [val for val in self.val_losses_per_epoch.values()]
         for id_k, key in enumerate(list(self.val_losses_per_epoch.keys())):
             if id_k == 0:
@@ -785,13 +793,20 @@ class ObjDetModule(pl.LightningModule):
                 else:
                     # val_string += f'\t\t\t{val_vals[i_loss][i_epoch]:.5f}'
                     val_string += f'\t\t{Decimal(val_vals[i_loss][i_epoch]):.3e}'
-        print(val_string) 
+        print(val_string+'\n')
+
+        if self.save_results and self.txt_path is not None:
+            save_string = train_string+'\n\n'+val_string
+            f = open(self.txt_path, 'w')
+            f.write(f'Latest learning rate:{self.learning_rate}\n\n')
+            f.write(save_string)
+            f.close()
 
 
 def metrics_sklearn(true_boxes, true_labels, pred_boxes, pred_labels, confidences, return_curve = False, verbose = False):
     # for precision-recall-curve
     scores_list, gt_classes_list, statistics = [], [], {'tps': 0, 'tp_ious': [], 'fps': 0, 'fns': 0}
-    iou_thresholds = [0.5] # [0.75]
+    iou_thresholds = [0.9] # [0.75] 0.9
     
     # iterate over each image
     for tboxes, tlabels, pboxes, plabels, confs in zip(true_boxes, true_labels, pred_boxes, pred_labels, confidences):    
@@ -821,7 +836,7 @@ def metrics_sklearn(true_boxes, true_labels, pred_boxes, pred_labels, confidence
         if average_precision > 0.5:
             print(f"[verbose call] average_precision={average_precision:.3e}, TPs: {statistics['tps']}, FPs: {statistics['tps']}, FNs: {statistics['fns']}")
 
-    # f = open("curve_values_FasterRCNN.txt", "w")
+    # f = open("curve_values_DETR_vanilla_imgAugm_94.11.txt", "w")
     # for idx, list_item in enumerate([precision, recall, thresholds]):
     #     f.write(f"__{idx}\n")
     #     for item in list_item:

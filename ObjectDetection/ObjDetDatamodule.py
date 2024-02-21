@@ -93,7 +93,7 @@ class ObjDetDatamodule(pl.LightningDataModule):
             return augment_on_batch_level(batch, self.config, self.transforms)
         else:
             images, labels, bboxes, numAgentsIds = zip(*batch)
-        return torch.stack(images, dim=0), labels, bboxes, torch.LongTensor(numAgentsIds)
+        return torch.stack(images, dim=0), labels, bboxes, torch.stack(numAgentsIds, dim=0)
     
 
     def yolo_collate(self, batch):
@@ -135,6 +135,10 @@ class ObjDetDatamodule(pl.LightningDataModule):
         self.boxes_temp = 'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\U9-Trackline_V3_boxes'
         self.img_path = 'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\U9-Trackline_V3_Input_Images'
         self.boxes_temp = 'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\crowdit-V3\\konvertiert'
+
+        # new dataset
+        self.img_path = 'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\U9-Trackline_V3_Input_Images-V4'
+        self.boxes_temp = 'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\crowdit-V4'
 
         self.set_filepaths()
         self.set_inference_paths()
@@ -190,19 +194,20 @@ class ObjDetDatamodule(pl.LightningDataModule):
         self.crowdit_list = []
         self.bboxes = []
 
-        if self.boxes_temp.endswith('konvertiert'):
+        if 'crowdit-V' in self.boxes_temp:
             from tqdm import tqdm
-            box_dir = [d for d in os.listdir(self.boxes_temp) if d.endswith('_res') and d.split('_')[4][1:] in ['10', '30', '50']]
-            img_dir = [d for d in os.listdir(self.img_path) if '_A10' in d]
-            assert len(box_dir) == len(img_dir)*3
+            box_dir = [d for d in os.listdir(self.boxes_temp) if d.endswith('_res') and ('_A10' in d or '_A30' in d or '_A50' in d)]
+            img_dir = [d for d in os.listdir(self.img_path) if d.endswith('.png')] # if '_A10' in d]
+            assert len(box_dir) == len(img_dir)#*3
             for b in tqdm(box_dir):
                 img_file = b.replace('_res', '.png')
-                if '_A30' in img_file: 
-                    img_file = img_file.replace('_A30', '_A10')
-                elif '_A50' in img_file:
-                    img_file = img_file.replace('_A50', '_A10')
+                # if '_A30' in img_file: 
+                #     img_file = img_file.replace('_A30', '_A10')
+                # elif '_A50' in img_file:
+                #     img_file = img_file.replace('_A50', '_A10')
                 img_file = os.path.join(self.img_path, img_file)
                 box_file = os.path.join(self.boxes_temp, b, 'criticalAreas.txt')
+                assert os.path.isfile(img_file) and os.path.isfile(box_file)
 
                 boxes_per_file = []
                 f = open(box_file, "r")
@@ -210,14 +215,20 @@ class ObjDetDatamodule(pl.LightningDataModule):
                 for line in file_lines:
                     x1, y1, x2, y2 = line.strip().split(',')
                     x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                    if y1==y2 or x1==x2:
+                        continue
+                    assert y2 > y1 and x2 > x1
                     boxes_per_file.append([x1, y1, x2, y2])
                 f.close()
-                boxes_per_file.append(b.split('_')[4][1:])
+                additional_info = b.replace('_res', '').split('_')
+                a, e, s, es, ss, c = additional_info[1][1:], additional_info[4][1:], additional_info[5][1:], additional_info[8][2:], additional_info[9][2:], additional_info[2][1]
+                # boxes_per_file.append([b.split('_A')[-1][:2]])
+                assert a in ['10', '30', '50'] and e in ['n', '1', '2', '3'] and es in ['n', '1', '2', '3'] and s in ['n', '0', '2.4'] and ss in ['n', '0', '2.4'] and c in ['0', '2']
+                boxes_per_file.append([a, e, s, es, ss, c])
                 # if b.split('_')[4][1:] == '10':
                 #     continue
                 self.bboxes.append(boxes_per_file)
                 self.img_list.append(img_file)
-
 
             return
 
@@ -580,12 +591,16 @@ class ObjDetDatamodule(pl.LightningDataModule):
         self.img_list_inference = []
         self.bboxes_inference = []
         self.img_inference_paths = [
-            'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\U9-Trackline-V3-2SBSS\\U9-Trackline-V3-2SBSS_refined_blacked.jpg',
-            'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\U9-Trackline-V3-U9\\Modell_U9_colored_blacked.jpg'
+            # 'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\U9-Trackline-V3-U9\\Modell_U9_colored_blacked.jpg',
+            'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\U9-Use cases\\old_stage\\Modell_U9_colored_blacked_processed_final.png',
+            # 'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\U9-Trackline-Vnew\\saved_from_xml_2_altered_final_padded.png',
+            # 'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\U9-Use cases\\new_stage\\saved_from_xml_2_altered_final_padded_processed.png',
+            'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\U9-Use cases\\new_stage\\saved_from_xml_2_altered_final_padded__new_processed.png'
+            # 'C:\\Users\\Remotey\\Documents\\Datasets\\BEYOND\\U9-Trackline-V3-2SBSS\\U9-Trackline-V3-2SBSS_refined_blacked.jpg'
         ]
         
         for img_path in self.img_inference_paths:
-            all_result_runs_folder = img_path.replace(img_path.split(SEP)[-1], 'results_updated')
+            all_result_runs_folder = img_path.replace(img_path.split(SEP)[-1], 'results_old')
             assert os.path.isdir(all_result_runs_folder)
             dir_list = [d for d in os.listdir(all_result_runs_folder) if d.endswith('_res')]
 
@@ -600,7 +615,11 @@ class ObjDetDatamodule(pl.LightningDataModule):
                     x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
                     boxes_per_file.append([x1, y1, x2, y2])
 
-                boxes_per_file.append(result_folder.split('_A')[-1][:2])
+                # boxes_per_file.append(result_folder.split('_A')[-1][:2])
+                if 'old_stage' in img_path:
+                    boxes_per_file.append([result_folder.split('_A')[-1][:2], 'n', 'n', '3', '0', '2'])
+                elif 'new_stage' in img_path:
+                    boxes_per_file.append([result_folder.split('_A')[-1][:2], '2', '0', '3', '0', '2'])
                 self.bboxes_inference.append(boxes_per_file)
                 f.close()
 

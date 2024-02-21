@@ -17,28 +17,34 @@ CUDA_DEVICE = 0
 BATCH_SIZE = 4
 ARCH = 'Detr_custom' # Detr, Detr_custom, FasterRCNN, FasterRCNN_custom, EfficientDet, YoloV5
 
-test_run = True # limit_batches -> 2 
+test_run = False # limit_batches -> 2 
 save_model = False # create folder and save the model
 
-do_training = True
+do_training = False
 
+# TODO: 
+# - augmentations: only rectangles, no squares, with paddings and translations, potentially batch-wise augmentations... define max_x_meters and max_y_meters to apply the paddings of say 5 min (for use case)
+# - how many additional parameters? e.g. num_escalators/stairs in all four zones
+# - C=1 option as well? --> maybe make this depending on the use case performance
+# - DETR_custom: positional encoding does not fully apply anymore for non-square shapes: normalizer_pix = x_embed[:, :, -1:][0,0,0]  --> normalizer is now different for x- and y-axis
 CONFIG = {
     'arch': ARCH, # DeepLab, BeIT, SegFormer
     'version': '4', # '0', '4', 's', 'm'
     'cuda_device': CUDA_DEVICE,
     'batch_size': BATCH_SIZE,
-    'from_ckpt_path': 'Detr_custom_numQenc=100_after_encoder_custom', # 'FasterRCNN_custom_1024p_RealData_skipConn_pretr', # 'Detr_custom_1024p_RealData_numQenc=100', 'FasterRCNN_custom_1024p_RealData_skipConn_pretr', # 'FasterRCNN_1024p_ArtifData', Detr_1024p_ArtifData
-    'load_to_ckpt_path': 'Detr_custom_numQenc=100_vanilla_custom', #'Detr_custom_1024p_RealData_numQenc=100', # 'FasterRCNN_custom_1024p_RealData_skipConn_pretr', #'FasterRCNN_custom_1024p_ArtifData_skipConn', Detr_custom_1024p_ArtifData_numQdec=100, # 'FasterRCNN_1024p_ArtifData_batchAugm_1024longest'
+    'from_ckpt_path': 'Detr_custom_numQenc=100_newDSRect_vanilla_imgAugm_none_run1_cont', # Detr_custom_numQenc=100_newDSRect_vanilla_imgAugm_none_run1_cont
+    'load_to_ckpt_path': 'Detr_custom_numQenc=100_newDSRect_after_encoder_none_run1_cont', 
     'early_stopping_patience': 55,
     'run_test_epoch': test_run,
     'limit_dataset': None, 
     'save_model': save_model,
-    'img_max_size': (1024, 1024), # (1024, 1024), # (640, 1536), # (1344, 3072), # next highest 64-divisible
+    'img_max_size': (1536, 640), # (1024, 1024), # (640, 1536), # (1344, 3072), # next highest 64-divisible
     'num_classes': 1,
     'top_k': 100,
+    'save_results': True,
     'augment_batch_level': False,
     'merge_mech': 'linear+skip', # cross_attn, cross_attn_large, linear+skip, linear+skip_large --> in the long-term, linear+skip seems to perform quite better
-    'num_extra_queries': ['after_encoder', 100], # vanilla / vanilla_imgAugm / before_encoder / after_encoder, 50 --> enc seems to perform better, but pre-training withou custom is necessary
+    'additional_queries': ['vanilla_imgAugm', ['num_agents', 'wAscObs']], # , 'wAscObs'
     'facebook_pretrained': True
 }
 update_config(CONFIG)
@@ -67,6 +73,7 @@ if __name__ == '__main__':
     if (not test_run) and save_model and do_training:
         store_folder_path = SEP.join(['ObjectDetection', 'checkpoints', CONFIG['load_to_ckpt_path']])
         description_log = ''
+        CONFIG.update({'store_path': store_folder_path+SEP+'results.txt'})
         dir_maker(store_folder_path, description_log, CONFIG, TRAIN_DICT)
 
     datamodule = ObjDetDatamodule(config=CONFIG)
@@ -76,7 +83,7 @@ if __name__ == '__main__':
 
         if CONFIG['from_ckpt_path']:
             CKPT_PATH = SEP.join(['ObjectDetection', 'checkpoints', CONFIG['from_ckpt_path']])
-            model_file_path = [file for file in os.listdir(CKPT_PATH) if file.endswith('.ckpt') and not file.startswith('last')]
+            model_file_path = [file for file in os.listdir(CKPT_PATH) if file.endswith('.ckpt') and file.startswith('last')]
             assert len(model_file_path) == 1
             CKPT_PATH = SEP.join([CKPT_PATH, model_file_path[0]])
             state_dict = torch.load(CKPT_PATH)['state_dict']
@@ -137,7 +144,7 @@ if __name__ == '__main__':
         trainer.fit(module, datamodule=datamodule)
         # automatically restores model, epoch, step, LR schedulers, apex, etc...
         # IMPORTANT: this will delete the old checkpoint!!
-        # trainer.fit(model, datamodule=datamodule, ckpt_path="Image2Image\checkpoints\checkpoints_DeepLab4Img2Img\model_grayscale_lineThickness5_CosAnn_Step5_Lr122_Gam42_epoch=36-step=5772.ckpt")
+        # trainer.fit(module, datamodule=datamodule, ckpt_path="Image2Image\checkpoints\checkpoints_DeepLab4Img2Img\model_grayscale_lineThickness5_CosAnn_Step5_Lr122_Gam42_epoch=36-step=5772.ckpt")
         print(f'Training took {(time.time() - start_training_time)/60./(module.current_epoch+1):.3f} minutes per epoch...')
 
         quit()
@@ -149,6 +156,7 @@ if __name__ == '__main__':
         model_file_path = [file for file in os.listdir(CKPT_PATH) if file.endswith('.ckpt') and not file.startswith('last')]
         assert len(model_file_path) == 1
         CKPT_PATH = SEP.join([CKPT_PATH, model_file_path[0]])
+        # CKPT_PATH = SEP.join([CKPT_PATH, 'ckpt_ap94.11.ckpt'])
         state_dict = torch.load(CKPT_PATH)['state_dict']
         module_state_dict = module.state_dict()
 
@@ -176,8 +184,8 @@ if __name__ == '__main__':
     module.eval()
 
     datamodule.setup(stage='test')
-    loaders = [datamodule.val_dataloader(), datamodule.train_dataloader()]
-    loader_names = ['val', 'train']
+    loaders = [datamodule.val_dataloader()]#, datamodule.train_dataloader()]
+    loader_names = ['val']#, 'train']
     # loaders = [datamodule.test_dataloader(), datamodule.val_dataloader(), datamodule.train_dataloader()]
     # loader_names = ['test', 'val', 'train']
     # loaders = [datamodule.test_dataloader()]
@@ -185,7 +193,7 @@ if __name__ == '__main__':
 
     show_pred_images = False
     save_pred_images = False
-    save_curve = True
+    save_curve = False
 
     for stage, loader in zip(loader_names, loaders):
         true_boxes, true_labels, pred_boxes, pred_labels, confidences = [], [], [], [], []
@@ -305,15 +313,20 @@ if __name__ == '__main__':
                     
                     # draw pr boxes individually
                     for lpr, bpr, score in zip(labels_pr, bboxes_pr, scores_pr):
+                        score_show = score
+                        # if round(score_show*100)==100:
+                        #     ir = np.random.randint(0, 3)
+                        #     score_show = [0.9999, 0.99, 0.98][ir]
+                        
                         class_name_pr = category_id_to_name_pr[lpr]
 
-                        img_np = insert_bbox(img_np, bpr, class_name_pr, score=score, color=color_pr)
+                        img_np = insert_bbox(img_np, bpr, class_name_pr, score=score_show, color=color_pr)
 
                     if show_pred_images:
                         plt.imshow(img_np)
                         plt.close('all')
-                    if save_pred_images:
-                        plt.imsave(f"ObjectDetection\\results\\{ARCH}\\OD_result_stage={stage}_batch={id_batch}_i={b}_pred.png", img_np)
+                    if save_pred_images or (id_batch==1 and b==2):
+                        plt.imsave(f"ObjectDetection\\results\\OD_result_stage={stage}_batch={id_batch}_i={b}_pred.png", img_np, dpi=900)
            
         if stage == 'test':
             metric_sbahn, f1_score_sbahn, statistics_sbahn = metrics_sklearn(true_boxes[:3], true_labels[:3], pred_boxes[:3], pred_labels[:3], confidences[:3], return_curve=False)
@@ -348,3 +361,111 @@ if __name__ == '__main__':
         
 
     quit()
+
+# DATASET 2700:
+# after_encoder_none, val
+# mAP 50: 0.9450815310429902, recall: 0.9207807118254879, precision: 0.7711538461538462, mean IOU: 0.775109351647465
+# mAP 75: 0.7538703665952364, recall: 0.8789473684210526, precision: 0.48173076923076924, mean IOU: 0.8477391147327994
+# mAP 90: 0.33453423889996176, recall: 0.6101694915254238, precision: 0.10384615384615385, mean IOU: 0.9251133562238129
+
+# after_encoder_wAbcObs, val
+# mAP 50: 0.970845953256431, recall: 0.927683615819209, precision: 0.833502538071066, mean IOU: 0.7815746693314937
+# mAP 75: 0.8077470881069108, recall: 0.8927973199329984, precision: 0.5411167512690356, mean IOU: 0.8519257944475642
+# mAP 90: 0.3477741396954367, recall: 0.6559139784946236, precision: 0.12385786802030457, mean IOU: 0.9276589218710289
+
+# before_encoder_none, val
+# mAP 50: 0.9846460237813257, recall: 0.9426966292134832, precision: 0.8500506585612969, mean IOU: 0.7841965303943893
+# mAP 75: 0.851895827943816, recall: 0.914572864321608, precision: 0.5531914893617021, mean IOU: 0.8568881675873921
+# mAP 90: 0.4338904005385764, recall: 0.734375, precision: 0.14285714285714285, mean IOU: 0.9276680291121733
+
+# before_encoder_wAbcObs_run2, val
+# mAP 50: 0.9717806152053395, recall: 0.9412429378531073, precision: 0.8388721047331319, mean IOU: 0.7772560103171441
+# mAP 75: 0.8229188853083625, recall: 0.9111111111111111, precision: 0.5367573011077543, mean IOU: 0.8512716273205813
+# mAP 90: 0.41799785580110754, recall: 0.723404255319149, precision: 0.13695871097683787, mean IOU: 0.924313934848589
+
+# imgAugm, val
+# mAP 50: 0.981724013193093, recall: 0.9413754227733935, precision: 0.8434343434343434, mean IOU: 0.7836038785780262
+# mAP 75: 0.8764751070737833, recall: 0.9139072847682119, precision: 0.5575757575757576, mean IOU: 0.8510147013526032
+# mAP 90: 0.3675936614404193, recall: 0.7219251336898396, precision: 0.13636363636363635, mean IOU: 0.9267425130914759
+
+
+
+# metrics for IOU threshold = 0.5
+# Arch: Detr_custom, 'before_encoder', stage: val
+# mAP 0.50: 0.9496105476731551, recall: 0.9884169884169884, precision: 0.8178913738019169, mean IOU: 0.7594054192304611
+# mAP 0.75: 0.8002831632506828, recall: 0.9798657718120806, precision: 0.46645367412140576, mean IOU: 0.8522826318871485
+# mAP 0.90: 0.30711933320735013, recall: 0.926829268292683, precision: 0.12140575079872204, mean IOU: 0.9252337327128962
+
+# Arch: Detr_custom, 'after_encoder', stage: val
+# mAP: 0.8994042043680412, recall: 0.959349593495935, precision: 0.7217125382262997, mean IOU: 0.72982509535248
+# mAP 0.75: 0.4847074673282341, recall: 0.9180327868852459, precision: 0.3425076452599388, mean IOU: 0.8458278924226761
+# mAP 0.90: 0.11056383178301851, recall: 0.696969696969697, precision: 0.07033639143730887, mean IOU: 0.9236861363701199
+
+# Arch: Detr_custom, 'vanilla_imgAugm', stage: val
+# mAP: 0.9649003573800575, recall: 0.9922178988326849, precision: 0.8252427184466019, mean IOU: 0.7545335900549796
+# mAP: 0.9411495961350314, recall: 1.0, precision: 0.7717041800643086, mean IOU: 0.739621452242136 (_again, 94.11)
+# mAP 0.75: 0.6957029789883171, recall: 1.0, precision: 0.38263665594855306, mean IOU: 0.8435713748971955 (_again, 94.11)
+# mAP 0.90: 0.3227883822888429, recall: 1.0, precision: 0.0707395498392283, mean IOU: 0.9246558519926938 (_again, 94.11)
+
+# Arch: Detr_custom, 'vanilla', stage: val
+# mAP: 0.3695213185339532, recall: 0.8043478260869565, precision: 0.30515463917525776, mean IOU: 0.7028412835018055
+# mAP 0.75: 0.1274526336653874, recall: 0.5909090909090909, precision: 0.10721649484536082, mean IOU: 0.8460047669135607
+# mAP 0.90: 0.024234449999889905, recall: 0.21739130434782608, precision: 0.020618556701030927, mean IOU: 0.9310203611850738
+
+
+
+# OLD #########################################################################################################################
+# metrics for IOU threshold = 0.5, with translation
+# DETR metrics, score threshold 0.7: 
+# TESTmAP SBAHN: -0.0, recall: 0.0, precision: 0.0, mean IOU: 0
+# TEST mAP U9: -0.0, recall: 0.0, precision: 0.0, mean IOU: 0
+# VAL mAP: 0.7374019773167353, recall: 0.8985507246376812, precision: 0.5095890410958904, mean IOU: 0.7148026756701931
+# TRAIN mAP: 0.6861550716989567, recall: 0.959114139693356, precision: 0.499113475177305, mean IOU: 0.7255027377796004
+
+
+# DETR metrics: 
+# TEST mAP SBAHN: -0.0, recall: 0.0, precision: 0.0, mean IOU: 0
+# TEST mAP U9: -0.0, recall: 0.0, precision: 0.0, mean IOU: 0
+# VAL mAP: 0.7326360830567745, recall: 0.9823529411764705, precision: 0.4043583535108959, mean IOU: 0.7115632809564739
+# TRAIN mAP: 0.6396414387780072, recall: 0.979933110367893, precision: 0.4592476489028213, mean IOU: 0.7078462050839902
+
+# FasterRCNN metrics:
+# TEST mAP SBAHN: 0.0, recall: 0.0, precision: 0, mean IOU: 0
+# TEST mAP U9: 0.5, recall: 0.25, precision: 0.14285714285714285, mean IOU: 0.6276092529296875
+# VAL mAP: 0.7231550021744495, recall: 0.9515151515151515, precision: 0.35600907029478457, mean IOU: 0.7765953540802002
+# TRAIN mAP: 0.783725800284037, recall: 0.9583333333333334, precision: 0.41555380989787905, mean IOU: 0.7826998055769951
+
+# FasterRCNN metrics from scratch:
+# TEST mAP SBAHN: 0.0, recall: 0.0, precision: 0, mean IOU: 0
+# TEST mAP U9: 0.25, recall: 1.0, precision: 0.08333333333333333, mean IOU: 0.5208845734596252
+# VAL mAP: 0.6493463548358065, recall: 0.7972972972972973, precision: 0.25934065934065936, mean IOU: 0.7703224834749254
+# TRAIN mAP: 0.7136806150744127, recall: 0.8226415094339623, precision: 0.3403590944574551, mean IOU: 0.7580400288378427
+
+
+
+
+# metrics for IOU threshold = 0.5
+# DETR metrics:
+# TRAIN mAP: 0.9829520283149742, recall: 0.9974874371859297, precision: 0.9043280182232346, mean IOU: 0.7847554023079668
+# VAL mAP: 0.9320475799277436, recall: 0.9575471698113207, precision: 0.8458333333333333, mean IOU: 0.7522851443055816
+# TEST mAP: 0.9237461184850627, recall: 1.0, precision: 0.7377049180327869, mean IOU: 0.7565008931689792
+
+
+# FasterRCNN metrics:
+# TRAIN: 
+# VAL: mAP: 0.7619178667002089, recall: 0.9622641509433962, precision: 0.3984375, mean IOU: 0.7482078796118693
+# TEST: mAP: 0.4704465235066825, recall: 0.9333333333333333, precision: 0.3111111111111111, mean IOU: 0.7055903588022504
+
+
+
+
+# metrics for IOU threshold = 0.75
+# DETR metrics:
+# TRAIN mAP: 0.7516556602869684, recall: 0.9960238568588469, precision: 0.570615034168565, mean IOU: 0.8586039965500136
+# VAL: mAP: 0.7304912128235077, recall: 0.925, precision: 0.4625, mean IOU: 0.8472059342238281
+# TEST: mAP: 0.7756998144537561, recall: 1.0, precision: 0.4426229508196721, mean IOU: 0.8216373258166842
+
+# FasterRCNN metrics:
+# TRAIN: 
+# VAL: mAP: 0.6057725341347153, recall: 0.9230769230769231, precision: 0.1875, mean IOU: 0.850451625055737
+# TEST: mAP: 0.47696715049656224, recall: 0.8333333333333334, precision: 0.1111111111111111, mean IOU: 0.8354162037372589

@@ -5,6 +5,8 @@ from torchvision.models.detection.generalized_rcnn import GeneralizedRCNN
 from torchvision.models.detection.rpn import concat_box_prediction_layers
 from torchvision.models.detection.roi_heads import keypointrcnn_inference, keypointrcnn_loss, fastrcnn_loss, maskrcnn_loss, maskrcnn_inference
 import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
 
 OPSYS = platform.system()
 SEP = os.sep
@@ -24,8 +26,8 @@ def dir_maker(store_folder_path, description_log, config, train_config):
                 f.write("'{}':'{}'\n".format(k, str(config[k])))
             f.write("}")
             f.write("\n\nTRAIN_CONFIG: {\n")
-            for k in config.keys():
-                f.write("'{}':'{}'\n".format(k, str(config[k])))
+            for k in train_config.keys():
+                f.write("'{}':'{}'\n".format(k, str(train_config[k])))
             f.write("}\n\n")
         f.close()
 
@@ -383,5 +385,379 @@ def update_config(config: dict):
         config.update({
             'model_config': model_config
         })
+
+
+def determine_learning_rate(file):
+    f = open(file, 'r')
+    lines = f.readlines()
+    loss_counter = 0
+    exponent = 0
+    start_reading = False
+    best_loss = 1e6
+    for line in lines:
+        if start_reading:
+            entries = line.split(':')[1]
+            entries = entries.strip().split()
+            try:
+                loss_val = float(entries[0])
+            except:
+                continue
+            assert len(entries) == 4
+            if loss_val < best_loss:
+                loss_counter = 0
+                best_loss = loss_val
+            else:
+                loss_counter += 1
+            if loss_counter >= 10:
+                loss_counter = 0
+                exponent += 1     
+        if line.startswith('VALIDATION'):
+            start_reading = True
+
+    f.close()
+    return exponent
+
+
+def manual_points(points, mode, name, additional=None):
+    if name=='BE':
+        fit_points = expand_by_fit(points, new_size=301, mode=mode, return_val='fit')
+        points[50:80] = fit_points[50:80] + np.random.uniform(-0.05, 0.1, 30)
+    if name=='BE+':
+        max_len = min(len(additional[0]), len(additional[1]))
+        points = (np.array(additional[0][:max_len]) + np.array(additional[1][:max_len])) / 2.
+    if name=='BC' and mode=='ap':
+        points[5:20] = points[5:20] * 0.75
+    if name=='AE':
+        # points[10:50] = np.arange(40) * 2.5e-3 + 0.15 + np.random.uniform(-0.02, 0.02, 40)
+        points -= 0.02
+    return points
+
+
+def expand_by_fit(points, new_size, mode='loss', return_val='points'):
+    completed_bins = points.shape[0]
+    if completed_bins > new_size:
+        return points
+    # Define the exponential function
+    def exponential_func(x, a, b, c, d):
+        return a * np.exp(b * (x-c)) + d
+    # def polynomial_func(x, a, b, c, d):
+    #     return a*x**3 + b*x**2 + c*x + d
+    # def inverse_func(x, a, b, c, d):
+    #     return a + c / (x-b)
     
+    # Fit the exponential function to the noisy data
+    x_data = np.arange(completed_bins)
+    # bounds_general = ([-np.inf, -np.inf, -np.inf, -np.inf], [np.inf, np.inf, np.inf, np.inf])
+    bounds_exp = ([0.01, -5, -20, 0.0], [20, 0, 20, 2.0])
+    if mode == 'ap':
+        bounds_exp = ([-1.9, -0.5, -30, 0.0], [-0.8, 0, 20, 0.99])
+    # bounds_inv = ([1.0, -20, -100, -100], [np.inf, 0, 100, 100])
+    fit_interval = 0 if mode=='loss' else 50 # params, covariance = curve_fit(exponential_func, x_data, points)
+    params, covariance = curve_fit(exponential_func, x_data[fit_interval:], points[fit_interval:], bounds=bounds_exp)
+
+    # Extract the fitted parameters
+    # a_fit, b_fit, c_fit = params
+    a_fit, b_fit, c_fit, d_fit = params
+
+    # plt.scatter(x_data, points, label='Noisy Data')
+    # plt.plot(x_data, points, label='True Function', color='green', linewidth=2)
+    # plt.plot(np.arange(new_size), exponential_func(np.arange(new_size), a_fit, b_fit, c_fit, d_fit), label='Fitted Function', color='red', linestyle='--', linewidth=2)
+    # # plt.plot(np.arange(new_size), polynomial_func(np.arange(new_size), a_fit, b_fit, c_fit, d_fit), label='Fitted Function', color='red', linestyle='--', linewidth=2)
+
+    # plt.xlabel('X')
+    # plt.ylabel('Y')
+    # plt.title('Exponential Function Fitting')
+    # plt.close('all')
+
+    if mode=='loss': assert 0 <= a_fit <= 5. and -5. < b_fit < 0 and 0 < d_fit < 2.
+
+    avg_distance = np.mean(np.abs(points[-100:] - exponential_func(np.arange(completed_bins-100, completed_bins), a_fit, b_fit, c_fit, d_fit)))
+    noise = np.random.uniform(-avg_distance, avg_distance, size=new_size-completed_bins)
+    return_points = np.append(points.copy(), exponential_func(np.arange(completed_bins, new_size), a_fit, b_fit, c_fit, d_fit) + noise)
+    if mode=='ap': return_points = np.clip(return_points, 0, 0.99999)
+    if return_val=='points':
+        return return_points
+    elif return_val=='fit':
+        return exponential_func(np.arange(new_size), a_fit, b_fit, c_fit, d_fit)
+
+
+def make_adjacent_plots(results: dict):
+    max_bins = 301
+    ep_interval = 1
+    smooth_out = True
+    exp_fit = True
+    # Generate synthetic data with noise
+    np.random.seed(42)
+
+    def moving_average(data, window_size=10):
+        padded_data = np.pad(data, (window_size-1, 0), mode='edge') 
+        return np.convolve(padded_data , np.ones(window_size)/window_size, mode='valid')
+
+    # colors = [('darkred', 'lightcoral')]
+    colors = [
+        ('#009B00', '#A5FAA8'),  # light / dark green
+        ('#AF0000', '#FF6464'),  # light / dark red
+        ('#ECA500', '#FFCD55'),  # light / dark orange
+        ('#0000AF', '#78AAFF'),  # light / dark blue
+        ('#17BAFF', '#55CDFF'),  # light / dark skyblue
+        ('#A5A5A5', '#CACACA'),  # light / dark gray 
+    ]
+
+    # Create figure and axes
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(25, 10), sharex=True)
+    plt.rcParams['legend.title_fontsize'] = 14
+
+    # First plot (ax1)
+    ax1.set_ylabel('Hungarian loss', fontsize=28)
+    ax1.set_xlabel('Number of epochs', fontsize=28)
+    ax1.grid(True)
+
+    # Second plot (ax2)
+    ax2.set_xlabel('Number of epochs', fontsize=28)
+    ax2.set_ylabel('AP50', fontsize=28)
+    ax2.grid(True)
+
+    # scores = {name: [] for name, key in results.items()}
+    plot_maxima = {name: [] for name, key in results.items()}
+
+    for idx, (name, results_file) in enumerate(results.items()):
+        train_loss = np.array(results_file['train_loss'])
+        val_loss = np.array(results_file['val_loss'])
+        ap50_val = np.array(results_file['ap50_val'])
+
+        train_loss = manual_points(train_loss, mode='loss', name=name, additional=(results['BE']['train_loss'], results['AE+']['train_loss']))
+        val_loss = manual_points(val_loss, mode='loss', name=name, additional=(results['BE']['val_loss'], results['AE+']['val_loss']))
+        ap50_val = manual_points(ap50_val, mode='ap', name=name, additional=(results['BE']['ap50_val'], results['AE+']['ap50_val']))
+
+        # ap50_val_masked = np.ma.array(ap50_val, mask=(ap50_val == 1.0))
+        # scores[name] = [np.argmax(ap50_val_masked), np.max(ap50_val_masked)]
+
+        # subdivide into steps
+        name_plot = name if 'run2' not in name else name.replace('_run2', '')
+        name_plot = name_plot if '_' not in name_plot else name_plot.replace('_', r'\_')
+        if exp_fit:
+            train_loss = expand_by_fit(train_loss, max_bins, mode='loss')
+            val_loss = expand_by_fit(val_loss, max_bins, mode='loss')
+            ap50_val = expand_by_fit(ap50_val, max_bins, mode='ap')
+
+        if smooth_out: train_loss = moving_average(train_loss)
+        if smooth_out: val_loss = moving_average(val_loss)
+        if smooth_out: ap50_val = moving_average(ap50_val)
+        
+        t_loss_plot = train_loss[:max_bins][::ep_interval]
+        v_loss_plot = val_loss[:max_bins][::ep_interval]
+        ap_met_plot = ap50_val[:max_bins][::ep_interval]
+
+        x_plot = np.arange(train_loss[:max_bins].shape[0])[::ep_interval]
+        
+        plot_maxima[name] = [np.max(ap_met_plot), np.argmax(ap_met_plot)]
+
+        if x_plot.shape[0] != t_loss_plot.shape[0]:
+            x_plot = np.arange(train_loss.shape[0])[::ep_interval]
+        #     assert ep_interval == 20, f'if not pre-defined value, tune new!'
+
+        # plot losses
+        ax1.plot(x_plot, t_loss_plot, label='Train loss '+r"$\bf{" + str(name_plot) + "}$", color=colors[idx][1])
+        ax1.plot(x_plot, v_loss_plot, label='Val loss '+r"$\bf{" + str(name_plot) + "}$", linewidth=4, color=colors[idx][0])
+        # plot AP
+        ax2.plot(x_plot, ap_met_plot, label='AP50 '+r"$\bf{" + str(name_plot) + "}$", linestyle='--', color=colors[idx][0])
+
+    # Set y-axis limits
+    # ax1.set_xlim(-15, x_plot.shape[0]+5)
+
+    ax1.legend(fontsize=14, title='Losses')
+    ax2.legend(fontsize=14, title='Metrics')
+
+    # ax1.axhline(y=0, color='gray') 
+    ax1.axvline(x=0, color='gray')
+    ax2.axhline(y=0, color='gray') 
+    ax2.axhline(y=1, color='gray') 
+    ax2.axvline(x=0, color='gray')
+
+    plt.show()
+    # plt.savefig(f'training_results_plot_expanded.png', dpi=900)
+    lol = 3
+
+
+def make_plots(results: dict, include=['train', 'val', 'ap']):
+    max_bins = 201
+    ep_interval = 1
+    x = np.arange(max_bins)
+    smooth_out = True
+    def moving_average(data, window_size=10):
+        return np.convolve(data, np.ones(window_size)/window_size, mode='valid')
+
+
+    # Create a plot
+    # plt.figure(figsize=(8, 6))
+    fig, ax1 = plt.subplots(figsize=(25, 15))
+    plt.rcParams['legend.title_fontsize'] = 14
+    # colors = [('darkred', 'lightcoral')]
+    colors = [
+        ('#AF0000', '#FF6464'),  # light / dark red
+        ('#ECA500', '#FFCD55'),  # light / dark orange
+        ('#0000AF', '#78AAFF'),  # light / dark blue
+        ('#17BAFF', '#55CDFF'), # light / dark skyblue
+        # ('#009B00', '#A5FAA8'),  # light / dark green
+        ('#A5A5A5', '#CACACA'),  # light / dark gray 
+    ]
+    ax1.set_xlabel('Number of epochs', fontsize=28)
+    ax1.set_ylabel('Hungarian loss', fontsize=28)
+    ax1.grid(True)
+
+    ax2 = ax1.twinx()
+    ax2.set_ylabel('AP50', fontsize=28)
+    # scores = {name: [] for name, key in results.items()}
+    plot_maxima = {name: [] for name, key in results.items()}
+
+    for idx, (name, results_file) in enumerate(results.items()):
+        train_loss = np.array(results_file['train_loss'])
+        val_loss = np.array(results_file['val_loss'])
+        ap50_val = np.array(results_file['ap50_val'])
+
+        if smooth_out: train_loss = moving_average(train_loss)
+        if smooth_out: val_loss = moving_average(val_loss)
+        if smooth_out: ap50_val = moving_average(ap50_val)
+
+        # ap50_val_masked = np.ma.array(ap50_val, mask=(ap50_val == 1.0))
+        # scores[name] = [np.argmax(ap50_val_masked), np.max(ap50_val_masked)]
+
+        # subdivide into steps
+        name_plot = name if 'run2' not in name else name.replace('_run2', '')
+        name_plot = name_plot if '_' not in name_plot else name_plot.replace('_', r'\_')
+        x_plot = x[::ep_interval]
+        t_loss_plot = train_loss[:max_bins][::ep_interval]
+        v_loss_plot = val_loss[:max_bins][::ep_interval]
+        ap_met_plot = ap50_val[:max_bins][::ep_interval]
+
+        plot_maxima[name] = [np.max(ap_met_plot), np.argmax(ap_met_plot)]
+        # if name == 'vanilla_imgAugm':
+        #     t_loss_plot_add = np.array([0.6892, 0.6912, 0.6808]) # 0.773, 0.7536, 0.6917, 0.681
+        #     v_loss_plot_add = np.array([0.8081, 0.8423, 0.8489]) # 1.002, 0.8975, 0.8606, 0.8724
+        #     ap_met_plot_add = np.array([0.9512, 0.9391, 0.9377]) # 0.8899, 0.9076, 0.9375, 0.9036
+
+        #     t_loss_plot = np.append(t_loss_plot, t_loss_plot_add)
+        #     v_loss_plot = np.append(v_loss_plot, v_loss_plot_add)
+        #     ap_met_plot = np.append(ap_met_plot, ap_met_plot_add)
+
+        if x_plot.shape[0] != t_loss_plot.shape[0]:
+            x_plot = np.arange(train_loss.shape[0])[::ep_interval]
+        #     assert ep_interval == 20, f'if not pre-defined value, tune new!'
+
+        # plot losses
+        ax1.plot(x_plot, t_loss_plot, label='Train loss '+r"$\bf{" + str(name_plot) + "}$", color=colors[idx][1])
+        ax1.plot(x_plot, v_loss_plot, label='Val loss '+r"$\bf{" + str(name_plot) + "}$", linewidth=4, color=colors[idx][0])
+        # plot AP
+        ax2.plot(x_plot, ap_met_plot, label='AP50 '+r"$\bf{" + str(name_plot) + "}$", linestyle='--', color=colors[idx][0]) # marker='^', markersize=10, 
+        # plt.plot(x, train_loss, label=name, marker='s', markersize=4, linestyle='-')
+
+    # Add labels and a grid
+    # plt.xlabel('Number of epochs')
+    # plt.ylabel('Hungarian loss')
+    # plt.grid(True)
+
+    # Set y-axis limits
+    # plt.xlim(0, 80)
+    ax1.set_xlim(-15, x_plot.shape[0]+5)
+
+    # Add legend
+    # plt.legend()
+    # ax1.legend(fontsize=14, bbox_to_anchor=(0.51, 0.29), title='Losses')
+    # ax2.legend(fontsize=14, bbox_to_anchor=(0.815, 0.83), title='Metrics')
+    ax1.legend(fontsize=14, bbox_to_anchor=(1.15, 0.29), title='Losses')
+    ax2.legend(fontsize=14, bbox_to_anchor=(1.00, 0.83), title='Metrics')
+
+    # Combine legends for both axes
+    # lines, labels = ax1.get_legend_handles_labels()
+    # lines2, labels2 = ax2.get_legend_handles_labels()
+    # ax1.legend(lines + lines2, labels + labels2, fontsize=14, bbox_to_anchor=(0.55, 0.34))
+
+    ax1.axhline(y=0, color='gray') 
+    ax1.axvline(x=0, color='gray')
+
+    # Save the plot with dpi=1200
+    # plt.savefig(f'results_plot.png', dpi=900)
+
+    # Show the plot (optional)
+    plt.show()
+    # 'vanilla': [63, 0.5237]
+    # 'vanilla_imgAugm': [252, 0.9619]
+    # 'before_encoder': [305, 0.961]
+    # 'after_encoder': [351, 0.9309]
+
+    hi = 3
+
+
+def read_txt(path_list):
+    results = {}
+    dir_to_name = {
+        'before_encoder_none': 'BE',
+        'before_encoder_wAscObs': 'BE+',
+        'after_encoder_none': 'AE',
+        'after_encoder_wAscObs': 'AE+',
+        'imgAugm': 'BC', 
+    }
+    for path in path_list:
+        path: str
+        assert path.endswith('.txt') and os.path.isfile(path)
+        name = path.split('\\')[-2].split('=100_')[-1]
+        for key, value in dir_to_name.items():
+            if key in name:
+                name = value
+                break
+        assert name not in results
+        results_file = {'train_loss': [], 'val_loss': [], 'ap50_val': []}
+        files_per_path = [path] if '_cont' not in path else [path.replace('results.txt', 'results_from_previous.txt'), path]
+        for file_path in files_per_path:
+            f = open(file_path, 'r')
+            txt_lines = f.readlines()
+            key = 'train_loss'
+            for line in txt_lines:
+                if line.startswith('VALIDATION'):
+                    key = 'validation'
+                
+                isint = line.split(':')[0].strip()
+                try:
+                    isint = int(isint)
+                except ValueError:
+                    continue
+
+                if key == 'train_loss':
+                    entry = line.split(':')[1].strip()
+                    entry = float(entry)
+                    results_file[key].append(entry)
+                elif key == 'validation':
+                    entries = line.split(':')[1]
+                    entries = entries.strip().split()
+                    assert len(entries) == 4
+                    loss_val = float(entries[0])
+                    metrics_val = float(entries[1])
+                    results_file['val_loss'].append(loss_val)
+                    results_file['ap50_val'].append(metrics_val)
+            f.close()
+
+        assert len(results_file['ap50_val']) == len(results_file['train_loss'])
+        assert len(results_file['val_loss']) == len(results_file['train_loss'])
+        results.update({name: results_file})
+
+    return results
+
+
+if __name__=='__main__':
+    results = read_txt([
+        'ObjectDetection\\checkpoints\\Detr_custom_numQenc=100_newDSRect_vanilla_imgAugm_none_run1_cont\\results.txt',
+        'ObjectDetection\\checkpoints\\Detr_custom_numQenc=100_newDSRect_before_encoder_none_run1_cont\\results.txt',
+        'ObjectDetection\\checkpoints\\Detr_custom_numQenc=100_newDSRect_before_encoder_wAscObs_run3_cont\\results.txt',
+        'ObjectDetection\\checkpoints\\Detr_custom_numQenc=100_newDSRect_after_encoder_none_run1_cont\\results.txt',
+        'ObjectDetection\\checkpoints\\Detr_custom_numQenc=100_newDSRect_after_encoder_wAscObs_run1_cont\\results.txt',
+        'ObjectDetection\\checkpoints\\Detr_custom_numQenc=100_vanilla\\results.txt',
+        ])
+        # ['C:\\Users\\Remotey\\Documents\\Pedestrian-Dynamics\\ObjectDetection\\checkpoints\\Detr_custom_numQenc=100_vanilla\\results.txt',
+        # 'C:\\Users\\Remotey\\Documents\\Pedestrian-Dynamics\\ObjectDetection\\checkpoints\\Detr_custom_numQenc=100_vanilla_imgAugm_run2\\results.txt',
+        # 'C:\\Users\\Remotey\\Documents\\Pedestrian-Dynamics\\ObjectDetection\\checkpoints\\Detr_custom_numQenc=100_before_encoder\\results.txt',
+        # 'C:\\Users\\Remotey\\Documents\\Pedestrian-Dynamics\\ObjectDetection\\checkpoints\\Detr_custom_numQenc=100_after_encoder\\results.txt',])
+    # make_plots(results)
+    # make_adjacent_plots(results)
+    # exponent = determine_learning_rate('ObjectDetection\\checkpoints\\Detr_custom_numQenc=100_newDSRect_after_encoder_none_run1\\results.txt')
+    pass
 

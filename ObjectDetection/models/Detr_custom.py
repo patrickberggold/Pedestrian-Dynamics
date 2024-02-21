@@ -16,6 +16,9 @@ class Detr_custom(DetrForObjectDetection):
         # TODO reload the model weights here to not have a pre-trained facebook model (from_pretrained() does this automatically)
         # TODO higher hidden_dim --> maybe 512, 1024, 2048 alternatives
         # TODO maybe number of layers encoder & decoder?
+        self.overwrite_functions()
+
+    def overwrite_functions(self):
         self.forward = self.forward
         self.model.forward = self.model_forward
         
@@ -32,24 +35,42 @@ class Detr_custom(DetrForObjectDetection):
     def update_model(self, custom_config: dict):
         
         # unload pretrained and initialize weights
-        # if not custom_config['facebook_pretrained']:
-        #     self.model = DetrModel(self.config)
+        if not custom_config['facebook_pretrained']:
+            print('Initializing random weights...')
+            self.model = DetrModel(self.config)
+            self.overwrite_functions()
 
-        self.extra_query_location, self.num_extra_queries = custom_config['num_extra_queries']
+        # self.extra_query_location, self.num_extra_queries = custom_config['num_extra_queries']
+        self.extra_query_location, self.query_info = custom_config['additional_queries']
+        
         assert self.extra_query_location in ['vanilla', 'vanilla_imgAugm', 'before_encoder', 'after_encoder'] # decoder taken out as it does not really make sense to mix with object queries
         
         # adjust number of classes
         self.class_labels_classifier = torch.nn.Linear(self.model.config.d_model, custom_config['num_classes'] + 1) # detection + no_detection
         self.model.config.num_labels = custom_config['num_classes']
         torch.nn.init.normal_(self.class_labels_classifier.weight, mean=0.0, std=self.config.init_std)
-        torch.nn.init.constant_(self.class_labels_classifier.bias, 0.0)  
+        torch.nn.init.constant_(self.class_labels_classifier.bias, 0.0)
+        self.embed_dim = 256
         
         # if not the original DETR implementation...
         if self.extra_query_location not in ['vanilla', 'vanilla_imgAugm']:
-            self.simulation_embeddings = torch.nn.Embedding(3, 256)
-            torch.nn.init.normal_(self.simulation_embeddings.weight.data, mean=0.0, std=self.config.init_std)
+            if 'num_agents' in self.query_info and 'wAscObs' not in self.query_info:
+                self.num_extra_queries = 100
+                self.central_ascent_embeddings, self.sides_ascent_embeddings = None, None
+                self.agent_embeddings = torch.nn.Embedding(3, self.embed_dim)
+            elif 'num_agents' in self.query_info and 'wAscObs' in self.query_info:
+                self.num_extra_queries = 100
+                self.agent_embeddings = torch.nn.Embedding(3, self.embed_dim) 
+                self.central_ascent_embeddings = torch.nn.Embedding(7, self.embed_dim) # additional 7 options (E=1/2/3 + S=0/2.4 + None) both for vertical ascent in the center and from the sides
+                self.sides_ascent_embeddings = torch.nn.Embedding(7, self.embed_dim)
+                self.obstacle_presence_embeddings = torch.nn.Embedding(2, self.embed_dim)
+                torch.nn.init.normal_(self.central_ascent_embeddings.weight.data, mean=0.0, std=self.config.init_std)
+                torch.nn.init.normal_(self.sides_ascent_embeddings.weight.data, mean=0.0, std=self.config.init_std)
+                torch.nn.init.normal_(self.obstacle_presence_embeddings.weight.data, mean=0.0, std=self.config.init_std)
+            torch.nn.init.normal_(self.agent_embeddings.weight.data, mean=0.0, std=self.config.init_std)
             self.model.backbone.position_embedding = DetrSinePositionEmbedding_custom(self.config.d_model // 2, normalize=True, num_extra_queries=self.num_extra_queries)
             # self.model.backbone.position_embedding = DetrSinePositionEmbedding_tester(self.config.d_model // 2, normalize=True, num_extra_queries=self.num_extra_queries)
+            # for crops (lacking global information): 
         else:
             self.num_extra_queries = None
 
@@ -233,7 +254,7 @@ class Detr_custom(DetrForObjectDetection):
     def forward(
         self,
         pixel_values,
-        agent_ids, # added to original code
+        information_ids, # added to original code
         pixel_mask=None,
         decoder_attention_mask=None,
         encoder_outputs=None,
@@ -293,8 +314,16 @@ class Detr_custom(DetrForObjectDetection):
         if self.extra_query_location in ['vanilla_imgAugm', 'vanilla']:
             simulation_embeddings = None
         else:
-            simulation_embeddings = self.simulation_embeddings(agent_ids).unsqueeze(1)
-            simulation_embeddings = simulation_embeddings.repeat(1, self.num_extra_queries, 1)
+            agent_ids, central_ids, sides_ids, obstacle_ids = torch.split(information_ids, 1, dim=1)
+            if self.central_ascent_embeddings is None and self.sides_ascent_embeddings is None:
+                simulation_embeddings = self.agent_embeddings(agent_ids).repeat(1, self.num_extra_queries, 1)
+            elif self.central_ascent_embeddings is not None and self.sides_ascent_embeddings is not None:
+                agent_embeddings = self.agent_embeddings(agent_ids).repeat(1, self.num_extra_queries//4, 1)
+                central_ascent_embeddings = self.central_ascent_embeddings(central_ids).repeat(1, self.num_extra_queries//4, 1)
+                sides_ascent_embeddings = self.sides_ascent_embeddings(sides_ids).repeat(1, self.num_extra_queries//4, 1)
+                obstacle_presence_embeddings = self.obstacle_presence_embeddings(obstacle_ids).repeat(1, self.num_extra_queries//4, 1)
+                simulation_embeddings = torch.cat((agent_embeddings, central_ascent_embeddings, sides_ascent_embeddings, obstacle_presence_embeddings), dim=1)
+            assert simulation_embeddings.shape == (information_ids.size(0), self.num_extra_queries, self.embed_dim), f'Wrong dimensions given, got ({simulation_embeddings.shape}() but should be ({information_ids.size(0), self.num_extra_queries, self.embed_dim})'
 
         # First, sent images through DETR base model to obtain encoder + decoder outputs
         outputs = self.model(
@@ -429,9 +458,11 @@ class DetrSinePositionEmbedding_custom(torch.nn.Module):
         y_embed = pixel_mask.cumsum(1, dtype=torch.float32)
         x_embed = pixel_mask.cumsum(2, dtype=torch.float32)
 
-        normalizer_pix = x_embed[:, :, -1:][0,0,0]
-        assert torch.all(torch.eq(normalizer_pix, y_embed[:, -1:, :]))
-        assert torch.all(torch.eq(normalizer_pix, x_embed[:, :, -1:]))
+        normalizer_pix_x = x_embed[:, :, -1:][0,0,0]
+        normalizer_pix_y = y_embed[:, -1:, :][0,0,0]
+        normalizer_pix = max(normalizer_pix_x, normalizer_pix_y)
+        # assert torch.all(torch.eq(normalizer_pix, y_embed[:, -1:, :]))
+        # assert torch.all(torch.eq(normalizer_pix, x_embed[:, :, -1:]))
 
         normalizer = normalizer_pix + self.num_extra_queries
 

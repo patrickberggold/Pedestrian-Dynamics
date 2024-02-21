@@ -34,15 +34,16 @@ class ObjDetDataset(Dataset):
         self.arch = config['arch']
         self.img_max_width, self.img_max_height = config['img_max_size']
         self.augment_batch_level = config['augment_batch_level']
-        self.augment_brightness = True if config['num_extra_queries'][0] == 'vanilla_imgAugm' else False
+        self.augment_brightness = True if config['additional_queries'][0] == 'vanilla_imgAugm' else False
         self.color_mappings = {
             0: {(255, 255, 0): (100, 100, 0), (255, 0, 0): (100, 0, 0)},
             1: {(255, 255, 0): (175, 175, 0), (255, 0, 0): (175, 0, 0)}
         } if self.augment_brightness else None
 
         self.batch_size = batch_size
-        # self.agentIds = {'005': 0, '010': 1, '020': 2}
         self.agentIds = {'10': 0, '30': 1, '50': 2}
+        self.ascentIds = {'En_Sn': 0, 'E1_S0': 1, 'E2_S0': 2, 'E3_S0': 3, 'E1_S2.4': 4, 'E2_S2.4': 5, 'E3_S2.4': 6} # (E=1/2/3 + S=0/2.4 + None) _E2_S2.4
+        self.obstaclesIds = {'C0': 0, 'C2': 1}
 
         assert len(self.bboxes) == len(self.img_paths), 'Length of image paths and trajectory paths do not match, something went wrong!'
 
@@ -65,8 +66,11 @@ class ObjDetDataset(Dataset):
         #     img_path, boxes_per_image = self.img_paths[index], self.bboxes[index]
         ## ... TO HERE
         index = None
-        num_agents = boxes_per_image[-1]
-        agentId = self.agentIds[boxes_per_image[-1]]
+        a, e, s, es, ss, c = boxes_per_image[-1]
+        agentId = self.agentIds[a]
+        # info = img_path.split(os.sep)[-1].replace('.png', '').split('_')
+        # e, s, es, ss, c = info[4][1:], info[5][1:], info[8][2:], info[9][2:], info[2]
+        central_id, sides_id, obstacles_id = self.ascentIds[f'E{e}_S{s}'], self.ascentIds[f'E{es}_S{ss}'], self.obstaclesIds[f'C{c}']
         boxes_per_image = boxes_per_image[:-1]
 
         labels = np.zeros((len(boxes_per_image)), dtype=np.int64) if self.arch not in ['FasterRCNN', 'FasterRCNN_custom'] else np.ones((len(boxes_per_image)), dtype=np.int64)
@@ -84,7 +88,7 @@ class ObjDetDataset(Dataset):
        
         if self.augment_batch_level:
             if self.arch in ['EfficientDet', 'YoloV5']: raise NotImplementedError
-            return img, labels, boxes_per_image, agentId
+            return img, labels, boxes_per_image, torch.tensor([agentId, central_id, sides_id, obstacles_id], dtype=torch.long)
         # implement reading the bbox
         # bboxes = np.clip(bboxes, 0, 1e4)
 
@@ -93,7 +97,7 @@ class ObjDetDataset(Dataset):
         #     self.p_dim_tf = [random.randint(0, 1) for _ in range(4)]
         #     print(f'Batch id: {idx}', self.p_dim_tf)
 
-        temp_img_save = img_path.replace('_A10', f'_A{num_agents}') if '_A10' in img_path else img_path.replace('.jpg', f'_A{num_agents}.jpg')
+        temp_img_save = img_path.split(os.sep)[-1] # .replace('_A10', f'_A{num_agents}') if '_A10' in img_path else img_path.replace('.jpg', f'_A{num_agents}.jpg')
         img, bboxes, labels = self.augmentations(img, boxes_per_image, labels, p_dim_tf=self.p_dim_tf, format=bbox_format, file=temp_img_save, index=index) #None) #
         if len(bboxes) > 0:
             bboxes = np.array([(round(box[0], 3), round(box[1], 3), round(box[2], 3), round(box[3], 3)) for box in bboxes])
@@ -118,7 +122,7 @@ class ObjDetDataset(Dataset):
         if self.arch in ['Detr', 'Detr_custom']:
             if bboxes.shape[0] != 0:
                 assert (bboxes[:, 2:] >= bboxes[:, :2]).all()
-            bboxes = xyxy2xywhn(bboxes, self.img_max_height, self.img_max_width)
+            bboxes = xyxy2xywhn(bboxes, self.img_max_width, self.img_max_height)
             if bboxes.shape[0] > 0: assert 1.0 >= np.max(bboxes)
         
         elif self.arch == 'EfficientDet':
@@ -126,9 +130,9 @@ class ObjDetDataset(Dataset):
             # bboxes = xyxy2xyxyn(bboxes, self.img_max_height, self.img_max_width)
             target = dict(bbox=bboxes, cls=np.ones_like(labels, dtype=np.int64))
 
-            return img, target, agentId
+            return img, target, torch.tensor([agentId, central_id, sides_id, obstacles_id], dtype=torch.long)
         elif self.arch == 'YoloV5':
-            bboxes = xyxy2xywhn(bboxes, self.img_max_height, self.img_max_width)
+            bboxes = xyxy2xywhn(bboxes, self.img_max_width, self.img_max_height)
             assert 1.0 >= np.max(bboxes)
 
         img = torch.tensor(img).permute(2, 0, 1).float()
@@ -150,19 +154,27 @@ class ObjDetDataset(Dataset):
         if self.transform:
             img = self.transform(img)
         
-        return img, labels, bboxes, agentId
+        return img, labels, bboxes, torch.tensor([agentId, central_id, sides_id, obstacles_id], dtype=torch.long)
 
 
     def augmentations(self, image, bboxes, labels, p_dim_tf, format='pascal_voc', file=None, index=None):
         tf_probs = [0.0, 1.]
         p_trans = 1.0
-        pad_square_size = 4224 # goes for LENGTH_IN_METER = 140.2
-        pad_square_size_big = pad_square_size * 212.48 / 140.2
-        resized_img = 2000 * 212.48 / 140.2
-        if '2SBSS' in file or 'U9_colored' in file:
-            pad_square_size = 2000
+        assert image.shape[1] <= 4470 and image.shape[0] <= 1840
+        # pad_square_size = 4470 # 4224 # goes for LENGTH_IN_METER = 140.2
+        pad_square_size_width = 4470 + 200 # 4224 # goes for LENGTH_IN_METER = 140.2
+        pad_square_size_height = 1840 + 100 # 4224 # goes for LENGTH_IN_METER = 140.2
+        # pad_square_size_big = pad_square_size * 212.48 / 150.2 # 140.2
+        resized_img = 2000 * 212.48 / 150.2 # 140.2
+        max_long_size = 1500
+        if '2SBSS' in file or 'U9_colored' in file or 'saved_from_xml' in file:
+            pad_square_size = 2000 + 90 # keeping the padding ration to normal input...
             tf_probs = [1., 0.] # [0., 1.]
             p_trans = 0.0
+            max_long_size = 1536 if 'saved_from_xml' in file else 1500
+            # if 'old': # img_size: (1486, 408)
+            #     pad_square_size_width = 1486
+            # elif 'new': # img_size: (1604, 403)
 
         # if '2SBSS' in file: pad_square_size = pad_square_size * 212.48 / 140.2
         # elif 'U9_colored' in file: pad_square_size = pad_square_size * 199.206 / 140.2
@@ -188,14 +200,14 @@ class ObjDetDataset(Dataset):
         #     FixedSizedBBoxSafeCrop(height=self.img_max_height, width=self.img_max_width, p=1.0),
         # ], bbox_params=A.BboxParams(format=format, label_fields=['category_ids']))
         
-        transform_pad_square = A.Compose([
-            A.PadIfNeeded(pad_square_size, pad_square_size, mask_value=0, border_mode=cv2.BORDER_CONSTANT, always_apply=True), # (4224, 4224) (561, 4174) # 1344
-            A.Resize(self.img_max_width, self.img_max_height),
-            A.augmentations.geometric.transforms.HorizontalFlip(p=0.5),
-            A.augmentations.geometric.transforms.VerticalFlip(p=0.5),
-            A.augmentations.geometric.rotate.RandomRotate90(p=0.5),
-            A.augmentations.geometric.transforms.Affine(translate_px=(0, 200), p=p_trans),
-        ], bbox_params=A.BboxParams(format=format, label_fields=['category_ids']))
+        # transform_pad_square = A.Compose([
+        #     A.PadIfNeeded(pad_square_size, pad_square_size, mask_value=0, border_mode=cv2.BORDER_CONSTANT, always_apply=True), # (4224, 4224) (561, 4174) # 1344
+        #     A.Resize(self.img_max_width, self.img_max_height),
+        #     # A.augmentations.geometric.transforms.Affine(translate_px=(0, self.img_max_width//2), p=p_trans),
+        #     A.augmentations.geometric.transforms.HorizontalFlip(p=0.5),
+        #     A.augmentations.geometric.transforms.VerticalFlip(p=0.5),
+        #     A.augmentations.geometric.rotate.RandomRotate90(p=0.5),
+        # ], bbox_params=A.BboxParams(format=format, label_fields=['category_ids']))
        
         # transform_cropping = A.Compose([
         #     A.PadIfNeeded(self.img_max_height, self.img_max_width, mask_value=0, border_mode=cv2.BORDER_CONSTANT, always_apply=True), # (4224, 4224) (561, 4174) # 1344
@@ -205,13 +217,22 @@ class ObjDetDataset(Dataset):
         #     FixedSizedBBoxSafeCrop(height=self.img_max_height, width=self.img_max_width, p=1.0),
         # ], bbox_params=A.BboxParams(format=format, label_fields=['category_ids']))
 
+        transform_rectangular = A.Compose([
+            A.LongestMaxSize(max_size=max_long_size, always_apply=True),
+            A.PadIfNeeded(self.img_max_height, self.img_max_width, mask_value=0, border_mode=cv2.BORDER_CONSTANT, always_apply=True), # (4224, 4224) (561, 4174) # 1344
+            A.augmentations.geometric.transforms.Affine(translate_px={'x': (0, 50), 'y': (0, 50)}, p=p_trans),
+            A.augmentations.geometric.transforms.HorizontalFlip(p=0.5),
+            A.augmentations.geometric.transforms.VerticalFlip(p=0.5),
+            # A.augmentations.geometric.rotate.RandomRotate90(p=0.5),
+        ], bbox_params=A.BboxParams(format=format, label_fields=['category_ids']))
+
         # transform = A.OneOf([
         #     transform_pad_square,
         #     transform_cropping,
         # ], p=1.0)
         # transform.transforms_ps = tf_probs
 
-        transformed = transform_pad_square(image=image, bboxes=bboxes, category_ids=labels)        
+        transformed = transform_rectangular(image=image, bboxes=bboxes, category_ids=labels)        
 
         if index is not None: visualize(transformed['image'], transformed['bboxes'], transformed['category_ids'], {0: 'Critical area'}, file=file)
 
